@@ -1,0 +1,8 @@
+[Unit]
+Description=Email notification: vkstats bot is down
+
+[Service]
+Type=oneshot
+User=vkstats
+WorkingDirectory=/opt/vkstats
+ExecStart=/opt/vkstats/venv/bin/python -m bot.notify

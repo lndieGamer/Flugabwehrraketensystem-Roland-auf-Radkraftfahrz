@@ -1,0 +1,20 @@
+[Unit]
+Description=VK chat stats bot
+After=network-online.target
+Wants=network-online.target
+# письмо, когда юнит окончательно сдох (исчерпал рестарты)
+OnFailure=vkstats-notify.service
+# crash-loop: >10 стартов за 2 минуты = failed, дальше не поднимаем
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=vkstats
+WorkingDirectory=/opt/vkstats
+ExecStart=/opt/vkstats/venv/bin/python -m bot.main
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

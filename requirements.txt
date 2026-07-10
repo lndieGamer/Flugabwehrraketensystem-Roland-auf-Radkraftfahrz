@@ -1,0 +1,6 @@
+vkbottle>=4.5
+aiosqlite>=0.20
+python-dotenv>=1.0
+tzdata>=2024.1
+matplotlib>=3.8
+pandas>=2.0

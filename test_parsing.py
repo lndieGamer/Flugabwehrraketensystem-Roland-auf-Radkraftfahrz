@@ -119,6 +119,33 @@ async def _test_import_and_queries(tmp: str):
     print('test_import_and_queries ok')
 
 
+def test_ranking():
+    from bot.ranking import compute_ranking, place_emoji
+
+    # A пишет первым, B догоняет и обгоняет, C присоединяется последним
+    rows = [(1, '2022-01-01T10:00:00'),
+            (2, '2022-01-02T10:00:00'),
+            (2, '2022-01-03T10:00:00'),
+            (3, '2022-01-04T10:00:00')]
+    places = compute_ranking(rows)
+    assert [p['vk_id'] for p in places] == [2, 1, 3]
+
+    b, a, c = places
+    assert b['count'] == 2 and b['event']['kind'] == 'up' and b['event']['other'] == 1
+    assert b['event']['date'] == '2022-01-03T10:00:00'
+    assert a['event']['kind'] == 'down' and a['event']['other'] == 2
+    assert c['event'] is None  # на своём месте с самого начала — алмаз
+
+    # равный счёт: выше тот, кто достиг его раньше
+    rows2 = rows + [(3, '2022-01-05T10:00:00')]  # C догнал A по счёту 1->2? нет: A=1, C=2
+    places2 = compute_ranking(rows2)
+    assert [p['vk_id'] for p in places2] == [2, 3, 1]  # C(2) обошёл A(1)
+    assert places2[1]['event']['kind'] == 'up' and places2[1]['event']['other'] == 1
+
+    assert place_emoji(1) == '🥇' and place_emoji(4) == '⚡' and place_emoji(9) == '🔸'
+    print('test_ranking ok')
+
+
 def test_build_msg_row():
     from types import SimpleNamespace as NS
     from bot.main import build_msg_row
@@ -142,6 +169,7 @@ def test_build_msg_row():
 
 if __name__ == '__main__':
     test_parser()
+    test_ranking()
     test_build_msg_row()
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(_test_import_and_queries(tmp))

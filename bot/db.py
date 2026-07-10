@@ -117,6 +117,20 @@ async def get_first_message_ts(db) -> str | None:
         return (await cur.fetchone())[0]
 
 
+async def get_human_messages(db) -> list[tuple[int, str]]:
+    """[(vk_id, ts)] всех сообщений людей (сообщества исключены) по возрастанию ts."""
+    async with db.execute(
+        """SELECT m.vk_id, m.ts FROM messages m JOIN users u ON u.vk_id = m.vk_id
+           WHERE u.is_community = 0 ORDER BY m.ts"""
+    ) as cur:
+        return await cur.fetchall()
+
+
+async def get_all_names(db) -> dict[int, str]:
+    async with db.execute('SELECT vk_id, display_name FROM users') as cur:
+        return dict(await cur.fetchall())
+
+
 async def get_timestamps(db, vk_id: int | None = None) -> list[str]:
     """Все ts (ISO) пользователя или всего чата — для построения графика."""
     sql, params = 'SELECT ts FROM messages', ()

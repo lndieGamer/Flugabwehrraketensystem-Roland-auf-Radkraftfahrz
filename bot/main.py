@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from vkbottle import PhotoMessageUploader, VKAPIError
 from vkbottle.bot import Bot, Message
 
-from bot import chart, db, parsing
+from bot import chart, db, parsing, ranking
 
 load_dotenv()
 bot = Bot(token=os.environ['VK_TOKEN'])
@@ -25,8 +25,9 @@ HELP_TEXT = (
     'Команды:\n'
     '/я, /me - карточка активности\n'
     '/ты, /you - карточка активности (ответом на сообщение другого человека)\n'
-    '/мы, /we - сравнение тебя и автора сообщения (ответом)\n'
+    '/мы, /we - сравнение автора и другого участника (ответом)\n'
     '/чат, /chat - карточка по всей беседе\n'
+    '/все, /all - график-гонка + места\n'
     '/ping - pong\n'
     '/help - справка'
 )
@@ -256,9 +257,12 @@ async def handle_command(conn, message: Message, text: str):
         await send_compare_card(conn, message, message.from_id, target, lang)
     elif cmd in ('/чат', '/chat'):
         await send_stats_card(conn, message, None, 'en' if cmd == '/chat' else 'ru')
+    elif cmd in ('/все', '/all'):
+        await send_ranking_card(conn, message, 'en' if cmd == '/all' else 'ru')
 
 
-async def render_and_send(message: Message, lang: str, label: str, render_fn):
+async def render_and_send(message: Message, lang: str, label: str, render_fn,
+                          text: str | None = None):
     """Рендерит PNG через render_fn(out_path), грузит в VK, шлёт в чат."""
     fd, out_path = tempfile.mkstemp(prefix='vkstats_', suffix='.png')
     os.close(fd)
@@ -280,7 +284,7 @@ async def render_and_send(message: Message, lang: str, label: str, render_fn):
             os.remove(out_path)
         except OSError:
             pass
-    await message.answer(attachment=photo)
+    await message.answer(text, attachment=photo)
 
 
 async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str = 'ru'):
@@ -330,6 +334,48 @@ async def send_compare_card(conn, message: Message, me_id: int, target_id: int, 
     await render_and_send(
         message, lang, f'{name_me} vs {name_t}',
         lambda p: chart.build_compare_chart((name_me, dates_me), (name_t, dates_t), p, subtitle, lang))
+
+
+RACE_TOP = 10  # линий на графике-гонке; больше — каша
+
+
+async def send_ranking_card(conn, message: Message, lang: str = 'ru'):
+    """/все: график-гонка + текстовый рейтинг с историей смен мест."""
+    rows = await db.get_human_messages(conn)
+    if not rows:
+        await message.answer('Сообщений ещё нет.' if lang == 'ru' else 'No messages yet.')
+        return
+    places = ranking.compute_ranking(rows)
+    names = await db.get_all_names(conn)
+
+    def name_of(vk_id):
+        return names.get(vk_id) or f'id{vk_id}'
+
+    lines = ['🏆 Рейтинг чата:' if lang == 'ru' else '🏆 Chat ranking:']
+    for p in places:
+        ev = p['event']
+        if ev is None:
+            suffix = '(💎 с самого начала)' if lang == 'ru' else '(💎 from the start)'
+        else:
+            d = date.fromisoformat(ev['date'][:10]).strftime('%d.%m.%Y')
+            if ev['kind'] == 'up':
+                word = 'обошёл' if lang == 'ru' else 'overtook'
+            else:
+                word = 'уступил' if lang == 'ru' else 'lost to'
+            suffix = f'({word}: {name_of(ev["other"])}, {d})'
+        lines.append(f'{ranking.place_emoji(p["rank"])} {p["rank"]}. '
+                     f'{name_of(p["vk_id"])} — {fmt(p["count"])} {suffix}')
+    text = '\n'.join(lines)
+
+    # график: топ-N, накопительные линии
+    by_user: dict[int, list] = {}
+    for vk_id, ts in rows:
+        by_user.setdefault(vk_id, []).append(datetime.fromisoformat(ts))
+    series = [(name_of(p['vk_id']), by_user[p['vk_id']]) for p in places[:RACE_TOP]]
+    await render_and_send(
+        message, lang, 'ranking',
+        lambda path: chart.build_race_chart(series, path, lang),
+        text=text)
 
 
 async def upload_photo(path: str) -> str:

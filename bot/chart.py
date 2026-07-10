@@ -53,6 +53,27 @@ def build_compare_chart(series_a, series_b, output_path: str,
     return _render([series_a, series_b], output_path, subtitle, lang)
 
 
+def build_race_chart(series, output_path: str, lang: str = 'ru'):
+    """Один большой график: накопительный итог каждого участника (/все).
+    series — [(имя, [datetime, ...])], уже отсортированы по убыванию итога."""
+    L = LABELS.get(lang, LABELS['ru'])
+    fig, ax = plt.subplots(figsize=(13, 8))
+    cmap = plt.get_cmap('tab10')
+    for i, (name, dates) in enumerate(series):
+        s = pd.Series(1, index=pd.DatetimeIndex(dates))
+        cumulative = s.resample('D').sum().cumsum()
+        ax.plot(cumulative.index, cumulative.values, linewidth=1.6,
+                color=cmap(i % 10), label=name)
+    ax.set_title(L['cumulative'], fontsize=14, loc='left')
+    ax.set_ylabel(L['total'])
+    _style_dates_axis(ax)
+    _style_common(ax)
+    ax.legend(frameon=False, fontsize=10)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    return output_path
+
+
 def _style_dates_axis(ax):
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%m.%Y'))

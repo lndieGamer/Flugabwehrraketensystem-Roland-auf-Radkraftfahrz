@@ -5,6 +5,12 @@ HEADER_RE = re.compile(
     r'^(\d{2})\.(\d{2})\.(\d{4}), (\d{2}):(\d{2}):(\d{2}) \| (.+?) \| cmid: (\d+)\s*$'
 )
 SENDER_RE = re.compile(r'^(.*?) \(vk\.ru/(id|club)(\d+)\)$')
+# Служебные события без префикса «Действие»: «X пригласил Y (vk.ru/idY)» и т.п.
+# Иначе имя Y затирается текстом события, а событие считается его сообщением.
+SERVICE_SENDER_RE = re.compile(
+    r'\b(пригласил|пригласила|исключил|исключила|вышел|вышла|вернулся|вернулась|'
+    r'закрепил|закрепила|открепил|открепила)\b'
+)
 
 REPLY_RE = re.compile(r'^\[Ответ на сообщение: cmid (\d+)\]$')
 PHOTO_RE = re.compile(r'^\[Фото \(https?://[^)]*\)\]$')
@@ -79,7 +85,7 @@ def _make_block(m: re.Match, body: list[str]) -> dict:
     d, mo, y, hh, mi, ss, sender, cmid = m.groups()
     ts = f'{y}-{mo}-{d}T{hh}:{mi}:{ss}'
     sm = SENDER_RE.match(sender)
-    if sender.startswith('Действие') or not sm:
+    if sender.startswith('Действие') or not sm or SERVICE_SENDER_RE.search(sm.group(1)):
         return {'service': True, 'cmid': int(cmid), 'ts': ts, 'sender_raw': sender}
     name, kind, num = sm.group(1), sm.group(2), int(sm.group(3))
     # сообщества (club...) храним с отрицательным vk_id — как отдаёт живой Long Poll

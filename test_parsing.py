@@ -37,16 +37,20 @@ FIXTURE = """03.08.2022, 17:22:53 | Е. Океанов (vk.ru/id45749440) | cmid
 Многострочное
 
 с пустой строкой внутри
+
+05.08.2022, 10:00:00 | Е. Океанов пригласил Д. Мещерякова (vk.ru/id999) | cmid: 15
+Е. Океанов пригласил Д. Мещерякова
 """
 
 
 def test_parser():
     blocks = list(parsing.parse_export(FIXTURE.splitlines()))
-    assert len(blocks) == 7, len(blocks)
+    assert len(blocks) == 8, len(blocks)
 
     by_cmid = {b['cmid']: b for b in blocks}
     assert by_cmid[10]['service'] is True
-    assert sum(b['service'] for b in blocks) == 1
+    assert by_cmid[15]['service'] is True  # «X пригласил Y» — событие, не сообщение Y
+    assert sum(b['service'] for b in blocks) == 2
 
     first = by_cmid[5]
     assert first['vk_id'] == 45749440
@@ -77,7 +81,7 @@ async def _test_import_and_queries(tmp: str):
     db_path = str(Path(tmp) / 'test.db')
 
     stats = await import_history.import_file(str(export), db_path)
-    assert stats == {'headers': 7, 'service_skipped': 1, 'inserted': 6, 'duplicates': 0}, stats
+    assert stats == {'headers': 8, 'service_skipped': 2, 'inserted': 6, 'duplicates': 0}, stats
 
     stats2 = await import_history.import_file(str(export), db_path)
     assert stats2['inserted'] == 0 and stats2['duplicates'] == 6, stats2  # идемпотентность
@@ -96,6 +100,15 @@ async def _test_import_and_queries(tmp: str):
 
         chat = await db.get_activity_stats(conn, today=date(2022, 8, 4))
         assert chat['total'] == 6 and chat['streak'] == 2
+
+        # фильтр по периоду: только 04.08 -> 4 сообщения; streak от конца периода
+        aug4 = await db.get_activity_stats(conn, since='2022-08-04T00:00:00',
+                                           until='2022-08-04T23:59:59')
+        assert aug4['total'] == 4 and aug4['streak'] == 1, aug4  # 03.08 вне периода
+        ts_aug3 = await db.get_timestamps(conn, until='2022-08-03T23:59:59')
+        assert len(ts_aug3) == 2
+        rows_aug4 = await db.get_human_messages(conn, since='2022-08-04T00:00:00')
+        assert len(rows_aug4) == 3  # club исключён
 
         ts_user = await db.get_timestamps(conn, 45749440)
         assert len(ts_user) == 3 and ts_user == sorted(ts_user)
@@ -146,6 +159,30 @@ def test_ranking():
     print('test_ranking ok')
 
 
+def test_parse_period():
+    from bot.main import parse_period
+
+    assert parse_period('') == (None, None)
+    assert parse_period('(01/01/2023-31/12/2023)') == ('2023-01-01T00:00:00', '2023-12-31T23:59:59')
+    assert parse_period('(Х-05/06/2024)') == (None, '2024-06-05T23:59:59')
+    assert parse_period('(x-05/06/2024)') == (None, '2024-06-05T23:59:59')
+    assert parse_period('(15/03/2023)') == ('2023-03-15T00:00:00', None)
+    # разные форматы дат: точки, слитно, двузначный год
+    assert parse_period('(01.01.23-31122023)') == ('2023-01-01T00:00:00', '2023-12-31T23:59:59')
+    assert parse_period('(15.03.23.)') == ('2023-03-15T00:00:00', None)
+    # открытые края
+    assert parse_period('(15/03/2023-)') == ('2023-03-15T00:00:00', None)
+    assert parse_period('(-15/03/2023)') == (None, '2023-03-15T23:59:59')
+    assert parse_period('(15/03/2023-х)') == ('2023-03-15T00:00:00', None)
+    for bad in ('(х)', '(2023)', '(32/01/2023)', 'вчера', '(01/01/2023', '(-)', '(х-х)'):
+        try:
+            parse_period(bad)
+            assert False, bad
+        except ValueError:
+            pass
+    print('test_parse_period ok')
+
+
 def test_build_msg_row():
     from types import SimpleNamespace as NS
     from bot.main import build_msg_row
@@ -170,6 +207,7 @@ def test_build_msg_row():
 if __name__ == '__main__':
     test_parser()
     test_ranking()
+    test_parse_period()
     test_build_msg_row()
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(_test_import_and_queries(tmp))

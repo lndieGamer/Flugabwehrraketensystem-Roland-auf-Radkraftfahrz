@@ -5,6 +5,7 @@
 import asyncio
 import json
 import os
+import re
 import tempfile
 import time
 from datetime import date, datetime, timezone
@@ -29,7 +30,10 @@ HELP_TEXT = (
     '/чат, /chat - карточка по всей беседе\n'
     '/все, /all - график-гонка + места\n'
     '/ping - pong\n'
-    '/help - справка'
+    '/help - справка\n'
+    'После команд статистики можно указать период: (дата-дата), (дата-) или (дата) - '
+    'от даты до конца, (-дата) или (Х-дата) - от начала до даты. '
+    'Дата: дд/мм/гггг, дд.мм.гг, ддммгггг и т.п.'
 )
 
 _db = None
@@ -67,6 +71,8 @@ def to_local_iso(d) -> str:
 def build_msg_row(item) -> dict | None:
     """Строка messages из объекта сообщения VK (live-событие или messages.getHistory)."""
     if item.conversation_message_id is None or item.from_id is None:
+        return None
+    if getattr(item, 'action', None):  # сервисное событие (пригласил/вышел/закреп)
         return None
     text = item.text or ''
     types = {getattr(a.type, 'value', str(a.type)) for a in (item.attachments or [])}
@@ -231,34 +237,95 @@ async def resolve_target(message: Message) -> int:
 
 NEED_REPLY = {'ru': 'Ответь командой на сообщение человека.',
               'en': "Reply to someone's message with this command."}
+PERIOD_HINT = {
+    'ru': 'Формат периода: (дата-дата), (дата-), (-дата), (Х-дата) или (дата). '
+          'Дата: дд/мм/гггг, дд.мм.гг, ддммгггг и т.п.',
+    'en': 'Period format: (date-date), (date-), (-date), (X-date) or (date). '
+          'Date: dd/mm/yyyy, dd.mm.yy, ddmmyyyy etc.',
+}
+
+_DATE_RE = re.compile(r'^(\d{2})[./]?(\d{2})[./]?(\d{4}|\d{2})$')
+
+
+def _parse_date(s: str, end: bool = False) -> str:
+    m = _DATE_RE.fullmatch(s.rstrip('.'))
+    if not m:
+        raise ValueError(s)
+    dd, mm, yy = m.groups()
+    year = int(yy) + 2000 if len(yy) == 2 else int(yy)
+    d = date(year, int(mm), int(dd))  # ValueError на несуществующей дате
+    return d.isoformat() + ('T23:59:59' if end else 'T00:00:00')
+
+
+def parse_period(arg: str) -> tuple[str | None, str | None]:
+    """(a-b) -> (a, b); (a-), (a) -> (a, None); (-b), (Х-b) -> (None, b).
+    Открытый/Х-край = None (начало статистики / последнее сообщение).
+    ValueError — кривой формат или несуществующая дата."""
+    if not arg:
+        return None, None
+    s = arg.strip()
+    if not (s.startswith('(') and s.endswith(')')):
+        raise ValueError(arg)
+    inner = s[1:-1].strip()
+
+    def is_open(tok):
+        return tok == '' or tok.lower() in ('х', 'x')
+
+    if '-' in inner:
+        left, right = (p.strip() for p in inner.split('-', 1))
+        since = None if is_open(left) else _parse_date(left)
+        until = None if is_open(right) else _parse_date(right, end=True)
+        if since is None and until is None:
+            raise ValueError(arg)
+        return since, until
+    if is_open(inner):
+        raise ValueError(arg)
+    return _parse_date(inner), None  # одиночная дата = старт, финиш открыт
+
+
+def period_label(since: str | None, until: str | None, lang: str = 'ru') -> str:
+    if not (since or until):
+        return ''
+    def f(iso):
+        return date.fromisoformat(iso[:10]).strftime('%d.%m.%Y')
+    a = f(since) if since else ('начало' if lang == 'ru' else 'start')
+    b = f(until) if until else ('сейчас' if lang == 'ru' else 'now')
+    return f'{a} – {b}'
 
 
 async def handle_command(conn, message: Message, text: str):
-    cmd = text.split()[0].lower()
+    parts = text.split(maxsplit=1)
+    cmd = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ''
     if cmd in ('/help', '/помощь'):
         await message.answer(HELP_TEXT)
-    elif cmd == '/ping':
+        return
+    if cmd == '/ping':
         await message.answer('pong')
-    elif cmd in ('/я', '/me'):
-        await send_stats_card(conn, message, message.from_id, 'en' if cmd == '/me' else 'ru')
-    elif cmd in ('/ты', '/you'):
-        lang = 'en' if cmd == '/you' else 'ru'
+        return
+    if cmd not in ('/я', '/me', '/ты', '/you', '/мы', '/we', '/чат', '/chat', '/все', '/all'):
+        return
+    lang = 'en' if cmd in ('/me', '/you', '/we', '/chat', '/all') else 'ru'
+    try:
+        since, until = parse_period(arg)
+    except ValueError:
+        await message.answer(PERIOD_HINT[lang])
+        return
+    if cmd in ('/я', '/me'):
+        await send_stats_card(conn, message, message.from_id, lang, since, until)
+    elif cmd in ('/ты', '/you', '/мы', '/we'):
         target = await resolve_target(message)
         if target == message.from_id:
             await message.answer(NEED_REPLY[lang])
             return
-        await send_stats_card(conn, message, target, lang)
-    elif cmd in ('/мы', '/we'):
-        lang = 'en' if cmd == '/we' else 'ru'
-        target = await resolve_target(message)
-        if target == message.from_id:
-            await message.answer(NEED_REPLY[lang])
-            return
-        await send_compare_card(conn, message, message.from_id, target, lang)
+        if cmd in ('/ты', '/you'):
+            await send_stats_card(conn, message, target, lang, since, until)
+        else:
+            await send_compare_card(conn, message, message.from_id, target, lang, since, until)
     elif cmd in ('/чат', '/chat'):
-        await send_stats_card(conn, message, None, 'en' if cmd == '/chat' else 'ru')
-    elif cmd in ('/все', '/all'):
-        await send_ranking_card(conn, message, 'en' if cmd == '/all' else 'ru')
+        await send_stats_card(conn, message, None, lang, since, until)
+    else:
+        await send_ranking_card(conn, message, lang, since, until)
 
 
 async def render_and_send(message: Message, lang: str, label: str, render_fn,
@@ -287,11 +354,15 @@ async def render_and_send(message: Message, lang: str, label: str, render_fn,
     await message.answer(text, attachment=photo)
 
 
-async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str = 'ru'):
+NO_MESSAGES = {'ru': 'Сообщений за период нет.', 'en': 'No messages in this period.'}
+
+
+async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str = 'ru',
+                          since: str | None = None, until: str | None = None):
     """Карточка активности одним PNG. vk_id=None — весь чат."""
-    stats = await db.get_activity_stats(conn, vk_id)
+    stats = await db.get_activity_stats(conn, vk_id, since=since, until=until)
     if not stats:
-        await message.answer('Сообщений ещё нет.' if lang == 'ru' else 'No messages yet.')
+        await message.answer(NO_MESSAGES[lang])
         return
     if vk_id is None:
         name = 'Весь чат' if lang == 'ru' else 'Whole chat'
@@ -304,20 +375,26 @@ async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str =
     else:
         subtitle = (f'Streak: {stats["streak"]} days   ·   '
                     f'Words per message: {stats["avg_words"]:.1f}')
+    period = period_label(since, until, lang)
+    if period:
+        subtitle += f'   ·   {period}'
 
-    dates = [datetime.fromisoformat(t) for t in await db.get_timestamps(conn, vk_id)]
+    dates = [datetime.fromisoformat(t)
+             for t in await db.get_timestamps(conn, vk_id, since, until)]
     await render_and_send(
         message, lang, name,
         lambda p: chart.build_chart(dates, p, name, subtitle, lang))
 
 
-async def send_compare_card(conn, message: Message, me_id: int, target_id: int, lang: str = 'ru'):
+async def send_compare_card(conn, message: Message, me_id: int, target_id: int,
+                            lang: str = 'ru', since: str | None = None,
+                            until: str | None = None):
     """Сравнение двух участников: по две серии в каждой панели."""
-    s_me = await db.get_activity_stats(conn, me_id)
-    s_t = await db.get_activity_stats(conn, target_id)
+    s_me = await db.get_activity_stats(conn, me_id, since=since, until=until)
+    s_t = await db.get_activity_stats(conn, target_id, since=since, until=until)
     if not s_me or not s_t:
-        await message.answer('У одного из вас ещё нет сообщений.' if lang == 'ru'
-                             else 'One of you has no messages yet.')
+        await message.answer('У одного из вас нет сообщений за период.' if lang == 'ru'
+                             else 'One of you has no messages in this period.')
         return
     name_me = await db.get_display_name(conn, me_id) or f'id{me_id}'
     name_t = await db.get_display_name(conn, target_id) or f'id{target_id}'
@@ -328,30 +405,44 @@ async def send_compare_card(conn, message: Message, me_id: int, target_id: int, 
     else:
         subtitle = (f'{name_me}: streak {s_me["streak"]} days, {s_me["avg_words"]:.1f} words/msg   ·   '
                     f'{name_t}: streak {s_t["streak"]} days, {s_t["avg_words"]:.1f} words/msg')
+    period = period_label(since, until, lang)
+    if period:
+        subtitle += f'   ·   {period}'
 
-    dates_me = [datetime.fromisoformat(t) for t in await db.get_timestamps(conn, me_id)]
-    dates_t = [datetime.fromisoformat(t) for t in await db.get_timestamps(conn, target_id)]
+    dates_me = [datetime.fromisoformat(t)
+                for t in await db.get_timestamps(conn, me_id, since, until)]
+    dates_t = [datetime.fromisoformat(t)
+               for t in await db.get_timestamps(conn, target_id, since, until)]
     await render_and_send(
         message, lang, f'{name_me} vs {name_t}',
         lambda p: chart.build_compare_chart((name_me, dates_me), (name_t, dates_t), p, subtitle, lang))
 
 
 RACE_TOP = 10  # линий на графике-гонке; больше — каша
+MIN_RANK_MESSAGES = 500  # порог попадания в рейтинг /все
 
 
-async def send_ranking_card(conn, message: Message, lang: str = 'ru'):
+async def send_ranking_card(conn, message: Message, lang: str = 'ru',
+                            since: str | None = None, until: str | None = None):
     """/все: график-гонка + текстовый рейтинг с историей смен мест."""
-    rows = await db.get_human_messages(conn)
+    rows = await db.get_human_messages(conn, since, until)
     if not rows:
-        await message.answer('Сообщений ещё нет.' if lang == 'ru' else 'No messages yet.')
+        await message.answer(NO_MESSAGES[lang])
         return
     places = ranking.compute_ranking(rows)
+    # порог отсекает хвост, ранги остаются сплошными 1..N;
+    # в маленьком/молодом чате порог не применяем, чтобы список не опустел
+    filtered = [p for p in places if p['count'] >= MIN_RANK_MESSAGES]
+    if filtered:
+        places = filtered
     names = await db.get_all_names(conn)
 
     def name_of(vk_id):
         return names.get(vk_id) or f'id{vk_id}'
 
-    lines = ['🏆 Рейтинг чата:' if lang == 'ru' else '🏆 Chat ranking:']
+    header = '🏆 Рейтинг чата' if lang == 'ru' else '🏆 Chat ranking'
+    period = period_label(since, until, lang)
+    lines = [f'{header} ({period}):' if period else f'{header}:']
     for p in places:
         ev = p['event']
         if ev is None:

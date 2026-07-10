@@ -117,11 +117,29 @@ async def get_first_message_ts(db) -> str | None:
         return (await cur.fetchone())[0]
 
 
-async def get_human_messages(db) -> list[tuple[int, str]]:
+def _range_where(vk_id=None, since=None, until=None, col='ts'):
+    """WHERE-фрагмент для необязательных фильтров по автору и периоду."""
+    conds, params = [], []
+    if vk_id is not None:
+        conds.append('vk_id = ?')
+        params.append(vk_id)
+    if since:
+        conds.append(f'{col} >= ?')
+        params.append(since)
+    if until:
+        conds.append(f'{col} <= ?')
+        params.append(until)
+    return (('WHERE ' + ' AND '.join(conds)) if conds else ''), params
+
+
+async def get_human_messages(db, since: str | None = None,
+                             until: str | None = None) -> list[tuple[int, str]]:
     """[(vk_id, ts)] всех сообщений людей (сообщества исключены) по возрастанию ts."""
+    where, params = _range_where(since=since, until=until, col='m.ts')
+    extra = where.replace('WHERE', 'AND') if where else ''
     async with db.execute(
-        """SELECT m.vk_id, m.ts FROM messages m JOIN users u ON u.vk_id = m.vk_id
-           WHERE u.is_community = 0 ORDER BY m.ts"""
+        f"""SELECT m.vk_id, m.ts FROM messages m JOIN users u ON u.vk_id = m.vk_id
+            WHERE u.is_community = 0 {extra} ORDER BY m.ts""", params
     ) as cur:
         return await cur.fetchall()
 
@@ -131,18 +149,23 @@ async def get_all_names(db) -> dict[int, str]:
         return dict(await cur.fetchall())
 
 
-async def get_timestamps(db, vk_id: int | None = None) -> list[str]:
-    """Все ts (ISO) пользователя или всего чата — для построения графика."""
-    sql, params = 'SELECT ts FROM messages', ()
-    if vk_id is not None:
-        sql, params = sql + ' WHERE vk_id = ?', (vk_id,)
-    async with db.execute(sql + ' ORDER BY ts', params) as cur:
+async def get_timestamps(db, vk_id: int | None = None, since: str | None = None,
+                         until: str | None = None) -> list[str]:
+    """ts (ISO) пользователя или всего чата за период — для построения графика."""
+    where, params = _range_where(vk_id, since, until)
+    async with db.execute(
+        f'SELECT ts FROM messages {where} ORDER BY ts', params
+    ) as cur:
         return [r[0] for r in await cur.fetchall()]
 
 
-async def get_activity_stats(db, vk_id: int | None = None, today: date | None = None) -> dict | None:
-    """Сова (0–6) / жаворонок (6–12), streak, средняя длина. vk_id=None — весь чат."""
-    where, params = ('WHERE vk_id = ?', (vk_id,)) if vk_id is not None else ('', ())
+async def get_activity_stats(db, vk_id: int | None = None, today: date | None = None,
+                             since: str | None = None, until: str | None = None) -> dict | None:
+    """Сова (0–6) / жаворонок (6–12), streak, средняя длина. vk_id=None — весь чат.
+    При заданном until streak считается относительно конца периода."""
+    where, params = _range_where(vk_id, since, until)
+    if today is None and until:
+        today = date.fromisoformat(until[:10])
     async with db.execute(
         f"""SELECT COUNT(*), AVG(word_count),
                    AVG(substr(ts, 12, 2) < '06'),

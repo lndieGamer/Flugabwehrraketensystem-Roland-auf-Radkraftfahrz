@@ -8,8 +8,15 @@ matplotlib.use('Agg')
 import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
+from matplotlib import font_manager  # noqa: E402
 
-plt.rcParams['font.family'] = 'DejaVu Sans'
+# DejaVu без CJK-глифов — японские/китайские ники превращаются в квадраты.
+# Подхватываем первый доступный CJK-шрифт как fallback (на VPS: apt install fonts-noto-cjk).
+_CJK_CANDIDATES = ['Noto Sans CJK JP', 'Noto Sans CJK SC', 'Yu Gothic', 'Meiryo',
+                   'MS Gothic', 'Malgun Gothic', 'Microsoft YaHei']
+_available = {f.name for f in font_manager.fontManager.ttflist}
+_cjk = [n for n in _CJK_CANDIDATES if n in _available]
+plt.rcParams['font.family'] = ['DejaVu Sans'] + _cjk[:1]
 
 SERIES_COLORS = ['#2a78d6', '#eda100']  # цвета серий в режиме сравнения
 
@@ -59,9 +66,13 @@ def build_race_chart(series, output_path: str, lang: str = 'ru'):
     L = LABELS.get(lang, LABELS['ru'])
     fig, ax = plt.subplots(figsize=(13, 8))
     cmap = plt.get_cmap('tab10')
+    end = max(max(dates) for _, dates in series)  # общий правый край
     for i, (name, dates) in enumerate(series):
         s = pd.Series(1, index=pd.DatetimeIndex(dates))
         cumulative = s.resample('D').sum().cumsum()
+        # ушедшие из чата: линия продолжается плоско до конца, а не обрывается
+        full = pd.date_range(cumulative.index.min(), end, freq='D')
+        cumulative = cumulative.reindex(full).ffill()
         ax.plot(cumulative.index, cumulative.values, linewidth=1.6,
                 color=cmap(i % 10), label=name)
     ax.set_title(L['cumulative'], fontsize=14, loc='left')

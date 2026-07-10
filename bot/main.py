@@ -25,6 +25,7 @@ HELP_TEXT = (
     'Команды:\n'
     '/я, /me - карточка активности\n'
     '/ты, /you - карточка активности (ответом на сообщение другого человека)\n'
+    '/мы, /we - сравнение тебя и автора сообщения (ответом)\n'
     '/чат, /chat - карточка по всей беседе\n'
     '/ping - pong\n'
     '/help - справка'
@@ -227,6 +228,10 @@ async def resolve_target(message: Message) -> int:
     return message.from_id
 
 
+NEED_REPLY = {'ru': 'Ответь командой на сообщение человека.',
+              'en': "Reply to someone's message with this command."}
+
+
 async def handle_command(conn, message: Message, text: str):
     cmd = text.split()[0].lower()
     if cmd in ('/help', '/помощь'):
@@ -239,12 +244,43 @@ async def handle_command(conn, message: Message, text: str):
         lang = 'en' if cmd == '/you' else 'ru'
         target = await resolve_target(message)
         if target == message.from_id:
-            await message.answer('Ответь командой на сообщение человека.' if lang == 'ru'
-                                 else "Reply to someone's message with this command.")
+            await message.answer(NEED_REPLY[lang])
             return
         await send_stats_card(conn, message, target, lang)
+    elif cmd in ('/мы', '/we'):
+        lang = 'en' if cmd == '/we' else 'ru'
+        target = await resolve_target(message)
+        if target == message.from_id:
+            await message.answer(NEED_REPLY[lang])
+            return
+        await send_compare_card(conn, message, message.from_id, target, lang)
     elif cmd in ('/чат', '/chat'):
         await send_stats_card(conn, message, None, 'en' if cmd == '/chat' else 'ru')
+
+
+async def render_and_send(message: Message, lang: str, label: str, render_fn):
+    """Рендерит PNG через render_fn(out_path), грузит в VK, шлёт в чат."""
+    fd, out_path = tempfile.mkstemp(prefix='vkstats_', suffix='.png')
+    os.close(fd)
+    try:
+        t0 = time.monotonic()
+        async with _render_lock:
+            await asyncio.to_thread(render_fn, out_path)
+        t1 = time.monotonic()
+        try:
+            photo = await upload_photo(out_path)
+        except (VKAPIError, json.JSONDecodeError):
+            await message.answer('VK не принял картинку, попробуй ещё раз.' if lang == 'ru'
+                                 else 'VK rejected the image, try again.')
+            return
+        t2 = time.monotonic()
+        print(f'card [{label}] lang={lang}: chart {t1 - t0:.1f}s, upload {t2 - t1:.1f}s')
+    finally:
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+    await message.answer(attachment=photo)
 
 
 async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str = 'ru'):
@@ -265,29 +301,35 @@ async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str =
         subtitle = (f'Streak: {stats["streak"]} days   ·   '
                     f'Words per message: {stats["avg_words"]:.1f}')
 
-    ts_list = await db.get_timestamps(conn, vk_id)
-    dates = [datetime.fromisoformat(t) for t in ts_list]
-    fd, out_path = tempfile.mkstemp(prefix='vkstats_', suffix='.png')
-    os.close(fd)
-    try:
-        t0 = time.monotonic()
-        async with _render_lock:
-            await asyncio.to_thread(chart.build_chart, dates, out_path, name, subtitle, lang)
-        t1 = time.monotonic()
-        try:
-            photo = await upload_photo(out_path)
-        except (VKAPIError, json.JSONDecodeError):
-            await message.answer('VK не принял картинку, попробуй ещё раз.' if lang == 'ru'
-                                 else 'VK rejected the image, try again.')
-            return
-        t2 = time.monotonic()
-        print(f'card [{name}] lang={lang}: chart {t1 - t0:.1f}s, upload {t2 - t1:.1f}s')
-    finally:
-        try:
-            os.remove(out_path)
-        except OSError:
-            pass
-    await message.answer(attachment=photo)
+    dates = [datetime.fromisoformat(t) for t in await db.get_timestamps(conn, vk_id)]
+    await render_and_send(
+        message, lang, name,
+        lambda p: chart.build_chart(dates, p, name, subtitle, lang))
+
+
+async def send_compare_card(conn, message: Message, me_id: int, target_id: int, lang: str = 'ru'):
+    """Сравнение двух участников: по две серии в каждой панели."""
+    s_me = await db.get_activity_stats(conn, me_id)
+    s_t = await db.get_activity_stats(conn, target_id)
+    if not s_me or not s_t:
+        await message.answer('У одного из вас ещё нет сообщений.' if lang == 'ru'
+                             else 'One of you has no messages yet.')
+        return
+    name_me = await db.get_display_name(conn, me_id) or f'id{me_id}'
+    name_t = await db.get_display_name(conn, target_id) or f'id{target_id}'
+
+    if lang == 'ru':
+        subtitle = (f'{name_me}: streak {s_me["streak"]} дн., {s_me["avg_words"]:.1f} слов/сообщ.   ·   '
+                    f'{name_t}: streak {s_t["streak"]} дн., {s_t["avg_words"]:.1f} слов/сообщ.')
+    else:
+        subtitle = (f'{name_me}: streak {s_me["streak"]} days, {s_me["avg_words"]:.1f} words/msg   ·   '
+                    f'{name_t}: streak {s_t["streak"]} days, {s_t["avg_words"]:.1f} words/msg')
+
+    dates_me = [datetime.fromisoformat(t) for t in await db.get_timestamps(conn, me_id)]
+    dates_t = [datetime.fromisoformat(t) for t in await db.get_timestamps(conn, target_id)]
+    await render_and_send(
+        message, lang, f'{name_me} vs {name_t}',
+        lambda p: chart.build_compare_chart((name_me, dates_me), (name_t, dates_t), p, subtitle, lang))
 
 
 async def upload_photo(path: str) -> str:

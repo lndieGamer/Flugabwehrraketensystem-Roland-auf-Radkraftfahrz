@@ -107,6 +107,13 @@ async def _test_import_and_queries(tmp: str):
         png = Path(tmp) / 'card.png'
         chart.build_chart([datetime.fromisoformat(t) for t in ts_all], str(png), 'Тест')
         assert png.stat().st_size > 10_000, png.stat().st_size
+
+        png2 = Path(tmp) / 'compare.png'
+        chart.build_compare_chart(
+            ('A', [datetime.fromisoformat(t) for t in ts_user]),
+            ('B', [datetime.fromisoformat(t) for t in await db.get_timestamps(conn, 123)]),
+            str(png2))
+        assert png2.stat().st_size > 10_000, png2.stat().st_size
     finally:
         await conn.close()
     print('test_import_and_queries ok')

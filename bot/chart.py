@@ -1,6 +1,6 @@
 """Карточка активности: 4 панели (сообщения в неделю, накопительный итог,
-по часам, по дням недели). Адаптация скрипта plot_activity.py: данные приходят
-списком datetime из БД, а не из текстовой выгрузки.
+по часам, по дням недели). Одна серия — личная карточка или весь чат,
+две серии — сравнение (/мы). Данные приходят списками datetime из БД.
 """
 import matplotlib
 
@@ -11,9 +11,12 @@ import pandas as pd  # noqa: E402
 
 plt.rcParams['font.family'] = 'DejaVu Sans'
 
+SERIES_COLORS = ['#2a78d6', '#eda100']  # цвета серий в режиме сравнения
+
 LABELS = {
     'ru': {
         'weekly': 'Сообщений в неделю (пик: {peak}, {date})',
+        'weekly_plain': 'Сообщений в неделю',
         'per_week': 'Сообщений/неделю',
         'cumulative': 'Накопительный итог сообщений',
         'total': 'Всего сообщений',
@@ -25,6 +28,7 @@ LABELS = {
     },
     'en': {
         'weekly': 'Messages per week (peak: {peak}, {date})',
+        'weekly_plain': 'Messages per week',
         'per_week': 'Messages/week',
         'cumulative': 'Cumulative messages',
         'total': 'Total messages',
@@ -39,24 +43,36 @@ LABELS = {
 
 def build_chart(dates, output_path: str, title: str | None = None,
                 subtitle: str | None = None, lang: str = 'ru'):
-    """dates — непустой список datetime; пишет PNG в output_path.
-    subtitle — строка сводки под заголовком; lang — язык подписей ('ru'/'en')."""
-    if not dates:
-        raise ValueError('Пустой список сообщений')
+    """Одна серия: dates — непустой список datetime; пишет PNG в output_path."""
+    return _render([(title, dates)], output_path, subtitle, lang)
+
+
+def build_compare_chart(series_a, series_b, output_path: str,
+                        subtitle: str | None = None, lang: str = 'ru'):
+    """Сравнение двух серий; series_* = (имя, список datetime)."""
+    return _render([series_a, series_b], output_path, subtitle, lang)
+
+
+def _style_dates_axis(ax):
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m.%Y'))
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+
+def _style_common(ax):
+    ax.grid(axis='y', color='#e1e0d9', linewidth=0.8)
+    ax.spines[['top', 'right']].set_visible(False)
+
+
+def _render(series, output_path, subtitle, lang):
     L = LABELS.get(lang, LABELS['ru'])
-
-    s = pd.Series(1, index=pd.DatetimeIndex(dates))
-    weekly = s.resample('W').sum()
-    cumulative = s.resample('D').sum().cumsum()
-
-    hours = [0] * 24
-    weekdays_counts = [0] * 7
-    for dt in dates:
-        hours[dt.hour] += 1
-        weekdays_counts[dt.weekday()] += 1
-    weekday_labels = L['weekdays']
+    multi = len(series) > 1
+    for _, dates in series:
+        if not dates:
+            raise ValueError('Пустой список сообщений')
 
     fig = plt.figure(figsize=(13, 10))
+    title = ' vs '.join(str(n) for n, _ in series) if multi else series[0][0]
     if title:
         fig.suptitle(title, fontsize=16, y=0.99)
     if subtitle:
@@ -65,53 +81,74 @@ def build_chart(dates, output_path: str, title: str | None = None,
 
     # Панель 1: сообщений в неделю
     ax1 = fig.add_subplot(gs[0, :])
-    ax1.plot(weekly.index, weekly.values, color='#2a78d6', linewidth=1.2)
-    ax1.fill_between(weekly.index, weekly.values, color='#2a78d6', alpha=0.15)
-    peak_idx = weekly.values.argmax()
-    peak_date = weekly.index[peak_idx]
-    peak_val = weekly.values[peak_idx]
-    ax1.set_title(
-        L['weekly'].format(peak=peak_val, date=peak_date.strftime('%d.%m.%Y')),
-        fontsize=13, loc='left',
-    )
+    for i, (name, dates) in enumerate(series):
+        s = pd.Series(1, index=pd.DatetimeIndex(dates))
+        # label='left': неделя подписывается своим понедельником, иначе
+        # resample('W') подписывает воскресеньем-концом — «пик в будущем»
+        weekly = s.resample('W-MON', closed='left', label='left').sum()
+        color = SERIES_COLORS[i] if multi else '#2a78d6'
+        ax1.plot(weekly.index, weekly.values, color=color, linewidth=1.2, label=name)
+        ax1.fill_between(weekly.index, weekly.values, color=color,
+                         alpha=0.08 if multi else 0.15)
+        if not multi:
+            peak_idx = weekly.values.argmax()
+            peak_date, peak_val = weekly.index[peak_idx], weekly.values[peak_idx]
+            ax1.plot(peak_date, peak_val, 'o', color='#eda100', markersize=7, zorder=3)
+            ax1.set_title(
+                L['weekly'].format(peak=peak_val, date=peak_date.strftime('%d.%m.%Y')),
+                fontsize=13, loc='left',
+            )
+    if multi:
+        ax1.set_title(L['weekly_plain'], fontsize=13, loc='left')
+        ax1.legend(frameon=False)
     ax1.set_ylabel(L['per_week'])
-    ax1.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m.%Y'))
-    ax1.grid(axis='y', color='#e1e0d9', linewidth=0.8)
-    ax1.spines[['top', 'right']].set_visible(False)
-    plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
-
-    ax1.plot(peak_date, peak_val, 'o', color='#eda100', markersize=7, zorder=3)
+    _style_dates_axis(ax1)
+    _style_common(ax1)
 
     # Панель 2: накопительный итог
     ax2 = fig.add_subplot(gs[1, :])
-    ax2.plot(cumulative.index, cumulative.values, color='#1baf7a', linewidth=1.5)
+    for i, (name, dates) in enumerate(series):
+        s = pd.Series(1, index=pd.DatetimeIndex(dates))
+        cumulative = s.resample('D').sum().cumsum()
+        color = SERIES_COLORS[i] if multi else '#1baf7a'
+        ax2.plot(cumulative.index, cumulative.values, color=color, linewidth=1.5, label=name)
     ax2.set_title(L['cumulative'], fontsize=13, loc='left')
     ax2.set_ylabel(L['total'])
-    ax2.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m.%Y'))
-    ax2.grid(axis='y', color='#e1e0d9', linewidth=0.8)
-    ax2.spines[['top', 'right']].set_visible(False)
-    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
+    _style_dates_axis(ax2)
+    _style_common(ax2)
 
     # Панель 3: по часам суток
     ax3 = fig.add_subplot(gs[2, 0])
-    bars = ax3.bar(range(24), hours, color='#4a3aa7', width=0.75)
+    bar_w, offsets = (0.38, (-0.2, 0.2)) if multi else (0.75, (0,))
+    for i, (name, dates) in enumerate(series):
+        hours = [0] * 24
+        for dt in dates:
+            hours[dt.hour] += 1
+        color = SERIES_COLORS[i] if multi else '#4a3aa7'
+        bars = ax3.bar([h + offsets[i] for h in range(24)], hours,
+                       width=bar_w, color=color, label=name)
+        if not multi:
+            bars[hours.index(max(hours))].set_color('#26215c')
     ax3.set_title(L['by_hour'], fontsize=13, loc='left')
     ax3.set_xlabel(L['hour'])
     ax3.set_ylabel(L['messages'])
     ax3.set_xticks(range(0, 24, 3))
-    ax3.grid(axis='y', color='#e1e0d9', linewidth=0.8)
-    ax3.spines[['top', 'right']].set_visible(False)
-    bars[hours.index(max(hours))].set_color('#26215c')
+    _style_common(ax3)
 
     # Панель 4: по дням недели
     ax4 = fig.add_subplot(gs[2, 1])
-    ax4.bar(weekday_labels, weekdays_counts, color='#eda100', width=0.6)
+    bar_w, offsets = (0.32, (-0.17, 0.17)) if multi else (0.6, (0,))
+    for i, (name, dates) in enumerate(series):
+        weekdays_counts = [0] * 7
+        for dt in dates:
+            weekdays_counts[dt.weekday()] += 1
+        color = SERIES_COLORS[i] if multi else '#eda100'
+        ax4.bar([d + offsets[i] for d in range(7)], weekdays_counts,
+                width=bar_w, color=color, label=name)
     ax4.set_title(L['by_weekday'], fontsize=13, loc='left')
     ax4.set_ylabel(L['messages'])
-    ax4.grid(axis='y', color='#e1e0d9', linewidth=0.8)
-    ax4.spines[['top', 'right']].set_visible(False)
+    ax4.set_xticks(range(7), L['weekdays'])
+    _style_common(ax4)
 
     plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
     plt.close(fig)

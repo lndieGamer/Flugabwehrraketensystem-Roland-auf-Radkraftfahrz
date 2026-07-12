@@ -98,30 +98,40 @@ async def ensure_user(conn, vk_id: int, ts: str) -> str:
     return name
 
 
-_peer_saved = False
+_main_peer: int | None = None  # peer_id основной беседы (кэш settings)
+
+
+async def should_log(conn, message: Message) -> bool:
+    """В статистику пишем только основную беседу. ЛС и посторонние чаты не логируем:
+    их cmid — независимые последовательности, и глобальный UNIQUE(cmid) в messages
+    молча выкидывает коллизии, а «пролезшие» строки засоряют статистику беседы.
+    Основной становится первая беседа, из которой пришло сообщение."""
+    global _main_peer
+    if message.peer_id < 2_000_000_000:  # ЛС
+        return False
+    if _main_peer is None:
+        saved = await db.get_setting(conn, 'peer_id')
+        if saved is None:
+            await db.set_setting(conn, 'peer_id', str(message.peer_id))
+            saved = str(message.peer_id)
+        _main_peer = int(saved)
+    return message.peer_id == _main_peer
 
 
 @bot.on.message()
 async def on_message(message: Message):
-    row = build_msg_row(message)
-    if row is None:
-        return
     conn = await get_db()
-
-    global _peer_saved
-    if not _peer_saved and message.peer_id > 2_000_000_000:  # только беседа, не ЛС
-        await db.set_setting(conn, 'peer_id', str(message.peer_id))
-        _peer_saved = True
-
-    name = await ensure_user(conn, row['vk_id'], row['ts'])
-
-    total_before = await db.get_total_count(conn)
-    user_before = await db.get_user_count(conn, row['vk_id'])
-    inserted = await db.insert_message(conn, row)
-    await conn.commit()
-
-    if inserted:
-        await check_milestones(conn, message, total_before + 1, user_before + 1, name)
+    if await should_log(conn, message):
+        row = build_msg_row(message)
+        if row is not None:
+            name = await ensure_user(conn, row['vk_id'], row['ts'])
+            total_before = await db.get_total_count(conn)
+            user_before = await db.get_user_count(conn, row['vk_id'])
+            inserted = await db.insert_message(conn, row)
+            await conn.commit()
+            if inserted:
+                await check_milestones(conn, message, total_before + 1, user_before + 1, name)
+    # команды работают везде (в ЛС удобно тестировать), статистика — по основной беседе
     text = (message.text or '').strip()
     if text.startswith('/'):
         await handle_command(conn, message, text)

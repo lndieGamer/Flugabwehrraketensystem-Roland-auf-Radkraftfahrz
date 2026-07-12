@@ -216,6 +216,30 @@ def test_extract_rank_range():
     print('test_extract_rank_range ok')
 
 
+async def _test_should_log(tmp: str):
+    from types import SimpleNamespace as NS
+    from bot import main as botmain
+
+    conn = await db.connect(str(Path(tmp) / 'log.db'))
+    try:
+        botmain._main_peer = None
+        dm = NS(peer_id=489228536)
+        chat = NS(peer_id=2_000_000_004)
+        other = NS(peer_id=2_000_000_099)
+        assert await botmain.should_log(conn, dm) is False  # ЛС не логируем
+        assert await botmain.should_log(conn, chat) is True  # первая беседа - основная
+        assert await db.get_setting(conn, 'peer_id') == '2000000004'
+        assert await botmain.should_log(conn, other) is False  # чужая беседа
+        # после «перезапуска» peer_id читается из settings, а не захватывается заново
+        botmain._main_peer = None
+        assert await botmain.should_log(conn, other) is False
+        assert await botmain.should_log(conn, chat) is True
+    finally:
+        botmain._main_peer = None
+        await conn.close()
+    print('test_should_log ok')
+
+
 def test_build_msg_row():
     from types import SimpleNamespace as NS
     from bot.main import build_msg_row
@@ -245,4 +269,5 @@ if __name__ == '__main__':
     test_build_msg_row()
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(_test_import_and_queries(tmp))
+        asyncio.run(_test_should_log(tmp))
     print('все проверки прошли')

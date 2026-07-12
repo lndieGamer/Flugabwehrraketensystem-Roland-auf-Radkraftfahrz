@@ -174,13 +174,46 @@ def test_parse_period():
     assert parse_period('(15/03/2023-)') == ('2023-03-15T00:00:00', None)
     assert parse_period('(-15/03/2023)') == (None, '2023-03-15T23:59:59')
     assert parse_period('(15/03/2023-х)') == ('2023-03-15T00:00:00', None)
-    for bad in ('(х)', '(2023)', '(32/01/2023)', 'вчера', '(01/01/2023', '(-)', '(х-х)'):
+    # без скобок
+    assert parse_period('01/01/2023-31/12/2023') == ('2023-01-01T00:00:00', '2023-12-31T23:59:59')
+    assert parse_period('15/03/2023-') == ('2023-03-15T00:00:00', None)
+    assert parse_period('-15/03/2023') == (None, '2023-03-15T23:59:59')
+    assert parse_period('х-05/06/2024') == (None, '2024-06-05T23:59:59')
+    assert parse_period('15.03.23') == ('2023-03-15T00:00:00', None)
+    assert parse_period('01.01.23 - 31.12.23') == ('2023-01-01T00:00:00', '2023-12-31T23:59:59')
+    for bad in ('(х)', '(2023)', '(32/01/2023)', 'вчера', '(01/01/2023', '(-)', '(х-х)',
+                '2023', '-', 'х-х', '01/01/2023)'):
         try:
             parse_period(bad)
             assert False, bad
         except ValueError:
             pass
     print('test_parse_period ok')
+
+
+def test_extract_rank_range():
+    from bot.main import extract_rank_range
+
+    assert extract_rank_range('') == ('', None)
+    assert extract_rank_range('2-15') == ('', (2, 15))
+    assert extract_rank_range('(2-15)') == ('', (2, 15))
+    assert extract_rank_range('2 - 15') == ('', (2, 15))
+    assert extract_rank_range('15-2') == ('', (2, 15))  # перепутанные края — меняем местами
+    assert extract_rank_range('5') == ('', (1, 5))  # одно число = топ-N
+    # диапазон + период в любом порядке; период уходит в остаток нетронутым
+    assert extract_rank_range('2-15 (01.01.23-31.12.23)') == ('(01.01.23-31.12.23)', (2, 15))
+    assert extract_rank_range('01.01.23-31.12.23 2-15') == ('01.01.23-31.12.23', (2, 15))
+    assert extract_rank_range('(01.01.23 - 31.12.23) 3') == ('(01.01.23-31.12.23)', (1, 3))
+    # даты (6+ цифр) диапазоном не считаются
+    assert extract_rank_range('15.03.23') == ('15.03.23', None)
+    assert extract_rank_range('150323') == ('150323', None)
+    for bad in ('0-5', '0'):
+        try:
+            extract_rank_range(bad)
+            assert False, bad
+        except ValueError:
+            pass
+    print('test_extract_rank_range ok')
 
 
 def test_build_msg_row():
@@ -208,6 +241,7 @@ if __name__ == '__main__':
     test_parser()
     test_ranking()
     test_parse_period()
+    test_extract_rank_range()
     test_build_msg_row()
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(_test_import_and_queries(tmp))

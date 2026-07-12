@@ -65,7 +65,7 @@ def build_race_chart(series, output_path: str, lang: str = 'ru'):
     series — [(имя, [datetime, ...])], уже отсортированы по убыванию итога."""
     L = LABELS.get(lang, LABELS['ru'])
     fig, ax = plt.subplots(figsize=(13, 8))
-    cmap = plt.get_cmap('tab10')
+    cmap = plt.get_cmap('tab10' if len(series) <= 10 else 'tab20')
     end = max(max(dates) for _, dates in series)  # общий правый край
     for i, (name, dates) in enumerate(series):
         s = pd.Series(1, index=pd.DatetimeIndex(dates))
@@ -74,7 +74,7 @@ def build_race_chart(series, output_path: str, lang: str = 'ru'):
         full = pd.date_range(cumulative.index.min(), end, freq='D')
         cumulative = cumulative.reindex(full).ffill()
         ax.plot(cumulative.index, cumulative.values, linewidth=1.6,
-                color=cmap(i % 10), label=name)
+                color=cmap(i % cmap.N), label=name)
     ax.set_title(L['cumulative'], fontsize=14, loc='left')
     ax.set_ylabel(L['total'])
     _style_dates_axis(ax)

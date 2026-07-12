@@ -28,11 +28,12 @@ HELP_TEXT = (
     '/ты, /you - карточка активности (ответом на сообщение другого человека)\n'
     '/мы, /we - сравнение автора и другого участника (ответом)\n'
     '/чат, /chat - карточка по всей беседе\n'
-    '/все, /all - график-гонка + места\n'
+    '/все, /all - график-гонка + места; можно задать диапазон мест на графике: '
+    '/все 2-15, одно число N - топ-N\n'
     '/ping - pong\n'
     '/help - справка\n'
-    'После команд статистики можно указать период: (дата-дата), (дата-) или (дата) - '
-    'от даты до конца, (-дата) или (Х-дата) - от начала до даты. '
+    'После команд статистики можно указать период: дата-дата, дата- или дата - '
+    'от даты до конца, -дата или Х-дата - от начала до даты. Скобки не обязательны. '
     'Дата: дд/мм/гггг, дд.мм.гг, ддммгггг и т.п.'
 )
 
@@ -238,10 +239,14 @@ async def resolve_target(message: Message) -> int:
 NEED_REPLY = {'ru': 'Ответь командой на сообщение человека.',
               'en': "Reply to someone's message with this command."}
 PERIOD_HINT = {
-    'ru': 'Формат периода: (дата-дата), (дата-), (-дата), (Х-дата) или (дата). '
+    'ru': 'Формат периода: дата-дата, дата-, -дата, Х-дата или дата (скобки не обязательны). '
           'Дата: дд/мм/гггг, дд.мм.гг, ддммгггг и т.п.',
-    'en': 'Period format: (date-date), (date-), (-date), (X-date) or (date). '
+    'en': 'Period format: date-date, date-, -date, X-date or date (parentheses optional). '
           'Date: dd/mm/yyyy, dd.mm.yy, ddmmyyyy etc.',
+}
+RANGE_HINT = {
+    'ru': 'Диапазон мест: N-M или (N-M), одно число N - топ-N.',
+    'en': 'Place range: N-M or (N-M), a single number N - top N.',
 }
 
 _DATE_RE = re.compile(r'^(\d{2})[./]?(\d{2})[./]?(\d{4}|\d{2})$')
@@ -258,15 +263,17 @@ def _parse_date(s: str, end: bool = False) -> str:
 
 
 def parse_period(arg: str) -> tuple[str | None, str | None]:
-    """(a-b) -> (a, b); (a-), (a) -> (a, None); (-b), (Х-b) -> (None, b).
+    """a-b -> (a, b); a-, a -> (a, None); -b, Х-b -> (None, b). Скобки опциональны.
     Открытый/Х-край = None (начало статистики / последнее сообщение).
     ValueError — кривой формат или несуществующая дата."""
     if not arg:
         return None, None
     s = arg.strip()
-    if not (s.startswith('(') and s.endswith(')')):
+    if s.startswith('(') and s.endswith(')'):
+        s = s[1:-1]
+    elif '(' in s or ')' in s:  # непарная скобка
         raise ValueError(arg)
-    inner = s[1:-1].strip()
+    inner = s.strip()
 
     def is_open(tok):
         return tok == '' or tok.lower() in ('х', 'x')
@@ -281,6 +288,33 @@ def parse_period(arg: str) -> tuple[str | None, str | None]:
     if is_open(inner):
         raise ValueError(arg)
     return _parse_date(inner), None  # одиночная дата = старт, финиш открыт
+
+
+_RANGE_RE = re.compile(r'(\d{1,3})(?:-(\d{1,3}))?')
+
+
+def extract_rank_range(arg: str) -> tuple[str, tuple[int, int] | None]:
+    """Вынимает из аргументов /все диапазон мест: 'N-M', '(N-M)' или 'N' (= топ-N).
+    Возвращает (остаток для parse_period, (lo, hi) | None). Числа до трёх цифр,
+    поэтому с датами (от шести цифр) не путается. ValueError — место 0."""
+    arg = re.sub(r'\s*-\s*', '-', arg)  # '2 - 15' и '01.01.23 - 31.12.23' -> без пробелов
+    rank_range, rest = None, []
+    for tok in re.findall(r'\([^()]*\)|\S+', arg):
+        inner = tok[1:-1].strip() if tok.startswith('(') and tok.endswith(')') else tok
+        m = _RANGE_RE.fullmatch(inner)
+        if m and rank_range is None:
+            if m.group(2) is not None:
+                lo, hi = int(m.group(1)), int(m.group(2))
+                if lo > hi:
+                    lo, hi = hi, lo
+            else:
+                lo, hi = 1, int(m.group(1))
+            if lo < 1 or hi < 1:
+                raise ValueError(tok)
+            rank_range = (lo, hi)
+        else:
+            rest.append(tok)
+    return ' '.join(rest), rank_range
 
 
 def period_label(since: str | None, until: str | None, lang: str = 'ru') -> str:
@@ -306,10 +340,16 @@ async def handle_command(conn, message: Message, text: str):
     if cmd not in ('/я', '/me', '/ты', '/you', '/мы', '/we', '/чат', '/chat', '/все', '/all'):
         return
     lang = 'en' if cmd in ('/me', '/you', '/we', '/chat', '/all') else 'ru'
+    rank_range = None
     try:
+        if cmd in ('/все', '/all'):
+            arg, rank_range = extract_rank_range(arg)
         since, until = parse_period(arg)
     except ValueError:
-        await message.answer(PERIOD_HINT[lang])
+        hint = PERIOD_HINT[lang]
+        if cmd in ('/все', '/all'):
+            hint += '\n' + RANGE_HINT[lang]
+        await message.answer(hint)
         return
     if cmd in ('/я', '/me'):
         await send_stats_card(conn, message, message.from_id, lang, since, until)
@@ -325,7 +365,7 @@ async def handle_command(conn, message: Message, text: str):
     elif cmd in ('/чат', '/chat'):
         await send_stats_card(conn, message, None, lang, since, until)
     else:
-        await send_ranking_card(conn, message, lang, since, until)
+        await send_ranking_card(conn, message, lang, since, until, rank_range)
 
 
 async def render_and_send(message: Message, lang: str, label: str, render_fn,
@@ -423,8 +463,10 @@ MIN_RANK_MESSAGES = 500  # порог попадания в рейтинг /вс
 
 
 async def send_ranking_card(conn, message: Message, lang: str = 'ru',
-                            since: str | None = None, until: str | None = None):
-    """/все: график-гонка + текстовый рейтинг с историей смен мест."""
+                            since: str | None = None, until: str | None = None,
+                            rank_range: tuple[int, int] | None = None):
+    """/все: график-гонка + текстовый рейтинг с историей смен мест.
+    rank_range — какие места рисовать на графике (по умолчанию топ-RACE_TOP)."""
     rows = await db.get_human_messages(conn, since, until)
     if not rows:
         await message.answer(NO_MESSAGES[lang])
@@ -458,11 +500,16 @@ async def send_ranking_card(conn, message: Message, lang: str = 'ru',
                      f'{name_of(p["vk_id"])} — {fmt(p["count"])} {suffix}')
     text = '\n'.join(lines)
 
-    # график: топ-N, накопительные линии
+    # график: выбранные места (по умолчанию топ-N), накопительные линии
+    lo, hi = rank_range if rank_range else (1, RACE_TOP)
+    if lo > len(places):
+        await message.answer(f'В рейтинге всего {len(places)} мест.' if lang == 'ru'
+                             else f'The ranking only has {len(places)} places.')
+        return
     by_user: dict[int, list] = {}
     for vk_id, ts in rows:
         by_user.setdefault(vk_id, []).append(datetime.fromisoformat(ts))
-    series = [(name_of(p['vk_id']), by_user[p['vk_id']]) for p in places[:RACE_TOP]]
+    series = [(name_of(p['vk_id']), by_user[p['vk_id']]) for p in places[lo - 1:hi]]
     await render_and_send(
         message, lang, 'ranking',
         lambda path: chart.build_race_chart(series, path, lang),

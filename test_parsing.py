@@ -240,6 +240,19 @@ async def _test_should_log(tmp: str):
     print('test_should_log ok')
 
 
+def test_extract_mentions():
+    from bot.main import extract_mentions
+
+    assert extract_mentions('') == ('', [])
+    assert extract_mentions('[id123|Вася]') == ('', [123])
+    assert extract_mentions('[id123|@vasya] [id456|Петя]') == ('', [123, 456])
+    assert extract_mentions('[club190546023|Iris]') == ('', [-190546023])
+    # период остаётся в остатке для parse_period
+    assert extract_mentions('[id123|Вася] 01.01.23-31.12.23') == ('01.01.23-31.12.23', [123])
+    assert extract_mentions('01.01.23- [id1|A] [id2|B]') == ('01.01.23-', [1, 2])
+    print('test_extract_mentions ok')
+
+
 def test_build_msg_row():
     from types import SimpleNamespace as NS
     from bot.main import build_msg_row
@@ -266,6 +279,7 @@ if __name__ == '__main__':
     test_ranking()
     test_parse_period()
     test_extract_rank_range()
+    test_extract_mentions()
     test_build_msg_row()
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(_test_import_and_queries(tmp))

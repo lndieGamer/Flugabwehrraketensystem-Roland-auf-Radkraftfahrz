@@ -25,8 +25,9 @@ USER_MILESTONES = {1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 200_000, 500_0
 HELP_TEXT = (
     'Команды:\n'
     '/я, /me - карточка активности\n'
-    '/ты, /you - карточка активности (ответом на сообщение другого человека)\n'
-    '/мы, /we - сравнение автора и другого участника (ответом)\n'
+    '/ты, /you - карточка активности (ответом на сообщение или @упоминанием)\n'
+    '/мы, /we - сравнение автора и другого участника (ответом или @упоминанием)\n'
+    '/вы, /they - сравнение двух участников: /вы @имя @имя\n'
     '/чат, /chat - карточка по всей беседе\n'
     '/все, /all - график-гонка + места; можно задать диапазон мест на графике: '
     '/все 2-15, одно число N - топ-N\n'
@@ -246,8 +247,10 @@ async def resolve_target(message: Message) -> int:
     return message.from_id
 
 
-NEED_REPLY = {'ru': 'Ответь командой на сообщение человека.',
-              'en': "Reply to someone's message with this command."}
+NEED_REPLY = {'ru': 'Ответь командой на сообщение человека или упомяни его через @.',
+              'en': "Reply to someone's message or @mention them."}
+NEED_TWO_MENTIONS = {'ru': 'Упомяни двух разных участников через @: /вы @имя @имя.',
+                     'en': 'Mention two different people: /they @name @name.'}
 PERIOD_HINT = {
     'ru': 'Формат периода: дата-дата, дата-, -дата, Х-дата или дата (скобки не обязательны). '
           'Дата: дд/мм/гггг, дд.мм.гг, ддммгггг и т.п.',
@@ -258,6 +261,17 @@ RANGE_HINT = {
     'ru': 'Диапазон мест: N-M или (N-M), одно число N - топ-N.',
     'en': 'Place range: N-M or (N-M), a single number N - top N.',
 }
+
+_MENTION_RE = re.compile(r'\[(id|club)(\d+)\|[^\]]*\]')
+
+
+def extract_mentions(arg: str) -> tuple[str, list[int]]:
+    """Вынимает VK-упоминания: '@Имя' в клиенте приходит как '[id123|Имя]'
+    (сообщества — '[club123|...]', vk_id отрицательный). Возвращает (остаток, [vk_id])."""
+    ids = [int(m.group(2)) if m.group(1) == 'id' else -int(m.group(2))
+           for m in _MENTION_RE.finditer(arg)]
+    return _MENTION_RE.sub(' ', arg).strip(), ids
+
 
 _DATE_RE = re.compile(r'^(\d{2})[./]?(\d{2})[./]?(\d{4}|\d{2})$')
 
@@ -347,13 +361,16 @@ async def handle_command(conn, message: Message, text: str):
     if cmd == '/ping':
         await message.answer('pong')
         return
-    if cmd not in ('/я', '/me', '/ты', '/you', '/мы', '/we', '/чат', '/chat', '/все', '/all'):
+    if cmd not in ('/я', '/me', '/ты', '/you', '/мы', '/we', '/вы', '/they',
+                   '/чат', '/chat', '/все', '/all'):
         return
-    lang = 'en' if cmd in ('/me', '/you', '/we', '/chat', '/all') else 'ru'
-    rank_range = None
+    lang = 'en' if cmd in ('/me', '/you', '/we', '/they', '/chat', '/all') else 'ru'
+    rank_range, mentions = None, []
     try:
         if cmd in ('/все', '/all'):
             arg, rank_range = extract_rank_range(arg)
+        if cmd in ('/ты', '/you', '/мы', '/we', '/вы', '/they'):
+            arg, mentions = extract_mentions(arg)
         since, until = parse_period(arg)
     except ValueError:
         hint = PERIOD_HINT[lang]
@@ -363,8 +380,13 @@ async def handle_command(conn, message: Message, text: str):
         return
     if cmd in ('/я', '/me'):
         await send_stats_card(conn, message, message.from_id, lang, since, until)
+    elif cmd in ('/вы', '/they'):
+        if len(mentions) != 2 or mentions[0] == mentions[1]:
+            await message.answer(NEED_TWO_MENTIONS[lang])
+            return
+        await send_compare_card(conn, message, mentions[0], mentions[1], lang, since, until)
     elif cmd in ('/ты', '/you', '/мы', '/we'):
-        target = await resolve_target(message)
+        target = mentions[0] if len(mentions) == 1 else await resolve_target(message)
         if target == message.from_id:
             await message.answer(NEED_REPLY[lang])
             return
@@ -443,8 +465,8 @@ async def send_compare_card(conn, message: Message, me_id: int, target_id: int,
     s_me = await db.get_activity_stats(conn, me_id, since=since, until=until)
     s_t = await db.get_activity_stats(conn, target_id, since=since, until=until)
     if not s_me or not s_t:
-        await message.answer('У одного из вас нет сообщений за период.' if lang == 'ru'
-                             else 'One of you has no messages in this period.')
+        await message.answer('У одного из участников нет сообщений за период.' if lang == 'ru'
+                             else 'One of the participants has no messages in this period.')
         return
     name_me = await db.get_display_name(conn, me_id) or f'id{me_id}'
     name_t = await db.get_display_name(conn, target_id) or f'id{target_id}'

@@ -144,6 +144,12 @@ async def get_human_messages(db, since: str | None = None,
         return await cur.fetchall()
 
 
+async def get_writer_count(db) -> int:
+    """Сколько людей (без сообществ) хоть раз писали в беседе."""
+    async with db.execute('SELECT COUNT(*) FROM users WHERE is_community = 0') as cur:
+        return (await cur.fetchone())[0]
+
+
 async def get_all_names(db) -> dict[int, str]:
     async with db.execute('SELECT vk_id, display_name FROM users') as cur:
         return dict(await cur.fetchall())

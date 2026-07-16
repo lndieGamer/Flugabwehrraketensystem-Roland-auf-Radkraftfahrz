@@ -253,6 +253,20 @@ def test_extract_mentions():
     print('test_extract_mentions ok')
 
 
+def test_plural_ru():
+    from bot.main import plural_ru, years_word
+
+    forms = ('участник', 'участника', 'участников')
+    assert plural_ru(1, *forms) == 'участник'
+    assert plural_ru(2, *forms) == 'участника'
+    assert plural_ru(5, *forms) == 'участников'
+    assert plural_ru(11, *forms) == 'участников'
+    assert plural_ru(21, *forms) == 'участник'
+    assert plural_ru(104, *forms) == 'участника'
+    assert years_word(1) == 'год' and years_word(3) == 'года' and years_word(12) == 'лет'
+    print('test_plural_ru ok')
+
+
 def test_build_msg_row():
     from types import SimpleNamespace as NS
     from bot.main import build_msg_row
@@ -280,6 +294,7 @@ if __name__ == '__main__':
     test_parse_period()
     test_extract_rank_range()
     test_extract_mentions()
+    test_plural_ru()
     test_build_msg_row()
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(_test_import_and_queries(tmp))

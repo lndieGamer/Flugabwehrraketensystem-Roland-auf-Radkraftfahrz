@@ -31,6 +31,7 @@ HELP_TEXT = (
     '/чат, /chat - карточка по всей беседе\n'
     '/все, /all - график-гонка + места; можно задать диапазон мест на графике: '
     '/все 2-15, одно число N - топ-N\n'
+    '/население, /population - сколько людей в беседе и сколько из них писали\n'
     '/ping - pong\n'
     '/help - справка\n'
     'После команд статистики можно указать период: дата-дата, дата- или дата - '
@@ -180,14 +181,18 @@ async def backfill_missed():
 
 # --- вехи ---
 
-def years_word(n: int) -> str:
+def plural_ru(n: int, one: str, few: str, many: str) -> str:
     if n % 100 in (11, 12, 13, 14):
-        return 'лет'
+        return many
     if n % 10 == 1:
-        return 'год'
+        return one
     if n % 10 in (2, 3, 4):
-        return 'года'
-    return 'лет'
+        return few
+    return many
+
+
+def years_word(n: int) -> str:
+    return plural_ru(n, 'год', 'года', 'лет')
 
 
 def fmt(n: int) -> str:
@@ -361,6 +366,9 @@ async def handle_command(conn, message: Message, text: str):
     if cmd == '/ping':
         await message.answer('pong')
         return
+    if cmd in ('/население', '/population'):
+        await send_population(conn, message, 'en' if cmd == '/population' else 'ru')
+        return
     if cmd not in ('/я', '/me', '/ты', '/you', '/мы', '/we', '/вы', '/they',
                    '/чат', '/chat', '/все', '/all'):
         return
@@ -398,6 +406,25 @@ async def handle_command(conn, message: Message, text: str):
         await send_stats_card(conn, message, None, lang, since, until)
     else:
         await send_ranking_card(conn, message, lang, since, until, rank_range)
+
+
+async def send_population(conn, message: Message, lang: str):
+    """/население: сколько людей в беседе сейчас и сколько хоть раз писали."""
+    try:
+        resp = await bot.api.messages.get_conversations_by_id(peer_ids=[message.peer_id])
+        members = resp.items[0].chat_settings.members_count
+    except Exception:  # ЛС (нет chat_settings) или API не ответил
+        members = None
+    writers = await db.get_writer_count(conn)
+    if lang == 'ru':
+        head = (f'👥 Население беседы: {members} '
+                f'{plural_ru(members, "участник", "участника", "участников")}'
+                if members is not None else '👥 Не смог узнать число участников')
+        await message.answer(f'{head}.\nПисали хоть раз: {writers}.')
+    else:
+        head = (f'👥 Chat population: {members} member{"s" if members != 1 else ""}'
+                if members is not None else "👥 Couldn't get the member count")
+        await message.answer(f'{head}.\nPosted at least once: {writers}.')
 
 
 async def render_and_send(message: Message, lang: str, label: str, render_fn,

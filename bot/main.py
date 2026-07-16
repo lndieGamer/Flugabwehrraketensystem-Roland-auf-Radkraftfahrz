@@ -463,8 +463,7 @@ async def send_population(conn, message: Message, lang: str,
     """/население: текст — сколько людей в беседе сейчас и сколько хоть раз писали,
     график — население по событиям входа/выхода (период кропает окно).
     События дают только дельты, поэтому якорим кривую на текущем members_count:
-    пропущенное событие сдвигает старый край, а не «сейчас». Пока событий в БД нет
-    (история не импортирована) — рисуем рост числа писавших."""
+    пропущенное событие сдвигает старый край, а не «сейчас»."""
     try:
         resp = await bot.api.messages.get_conversations_by_id(peer_ids=[message.peer_id])
         members = resp.items[0].chat_settings.members_count
@@ -485,17 +484,18 @@ async def send_population(conn, message: Message, lang: str,
                 if members is not None else "👥 Couldn't get the member count")
         text = f'{head}.\nPosted at least once: {writers}.'
     events = await db.get_member_events(conn)
-    writers_curve = not events
-    if events:
-        # без members якорим на нуле до первого события — экспорт идёт с создания чата
-        base = members - sum(d for _, d in events) if members is not None else 0
-        pts = population_points(events, base, since, until)
-    else:
-        pts = population_points([(t, 1) for t in firsts], 0, since, until)
+    if not events:
+        hint = ('\nГрафика нет: в БД нет событий входа/выхода — '
+                'запусти python scripts/import_history.py.' if lang == 'ru' else
+                '\nNo chart: no join/leave events in DB — run python scripts/import_history.py.')
+        await message.answer(text + hint)
+        return
+    # без members якорим на нуле до первого события — экспорт идёт с создания чата
+    base = members - sum(d for _, d in events) if members is not None else 0
+    pts = population_points(events, base, since, until)
     await render_and_send(
         message, lang, 'population',
-        lambda p: chart.build_population_chart(pts, p, period_label(since, until, lang),
-                                               lang, writers_curve),
+        lambda p: chart.build_population_chart(pts, p, period_label(since, until, lang), lang),
         text=text)
 
 

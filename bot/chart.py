@@ -33,7 +33,6 @@ LABELS = {
         'by_weekday': 'По дням недели',
         'weekdays': ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'],
         'population': 'Население беседы',
-        'population_writers': 'Население беседы (писали хоть раз)',
         'people': 'Человек',
     },
     'en': {
@@ -48,7 +47,6 @@ LABELS = {
         'by_weekday': 'By day of week',
         'weekdays': ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
         'population': 'Chat population',
-        'population_writers': 'Chat population (posted at least once)',
         'people': 'People',
     },
 }
@@ -92,17 +90,15 @@ def build_race_chart(series, output_path: str, lang: str = 'ru'):
 
 
 def build_population_chart(points, output_path: str, subtitle: str | None = None,
-                           lang: str = 'ru', writers_curve: bool = False):
+                           lang: str = 'ru'):
     """График населения (/население): points — [(datetime, участников)],
-    ступенчатая линия, значения абсолютные (кроп периода делает вызывающий).
-    writers_curve — фолбэк «писали хоть раз», когда событий входа/выхода нет."""
+    ступенчатая линия, значения абсолютные (кроп периода делает вызывающий)."""
     L = LABELS.get(lang, LABELS['ru'])
     fig, ax = plt.subplots(figsize=(13, 6))
     xs, ys = zip(*points)
     ax.step(xs, ys, where='post', color='#2a78d6', linewidth=1.8)
     ax.fill_between(xs, ys, step='post', color='#2a78d6', alpha=0.15)
-    title = L['population_writers' if writers_curve else 'population']
-    title += f'   ·   {subtitle}' if subtitle else ''
+    title = L['population'] + (f'   ·   {subtitle}' if subtitle else '')
     ax.set_title(title, fontsize=14, loc='left')
     ax.set_ylabel(L['people'])
     _style_dates_axis(ax)

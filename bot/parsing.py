@@ -12,6 +12,29 @@ SERVICE_SENDER_RE = re.compile(
     r'закрепил|закрепила|открепил|открепила)\b'
 )
 
+# События состава беседы в служебных заголовках экспорта. Цель события — последний
+# vk.ru-адрес строки (жадный .* в invite/kick пропускает адрес инициатора).
+_URL = r'\(vk\.ru/(id|club)(\d+)\)'
+_EVENT_RES = [
+    (re.compile(rf'пригласил\(а\) .*{_URL}$'), 1),
+    (re.compile(rf'{_URL} вступил(?:а)? в чат по ссылке$'), 1),
+    (re.compile(rf'{_URL} создал(?:а)? чат'), 1),
+    (re.compile(rf'исключил\(а\) .*{_URL} из чата$'), -1),
+    (re.compile(rf'{_URL} (?:вышел|вышла) из чата$'), -1),
+]
+
+
+def member_event(sender_raw: str) -> tuple[int, int] | None:
+    """(vk_id, ±1) из служебного заголовка: пригласил/вступил/создал/исключил/вышел.
+    None — событие не про состав беседы (закреп, смена фото и т.п.)."""
+    for rx, delta in _EVENT_RES:
+        m = rx.search(sender_raw)
+        if m:
+            num = int(m.group(2))
+            return (-num if m.group(1) == 'club' else num, delta)
+    return None
+
+
 REPLY_RE = re.compile(r'^\[Ответ на сообщение: cmid (\d+)\]$')
 PHOTO_RE = re.compile(r'^\[Фото \(https?://[^)]*\)\]$')
 VOICE_RE = re.compile(r'^\[Голосовое сообщение \(https?://[^)]*\)\]$')
@@ -86,7 +109,8 @@ def _make_block(m: re.Match, body: list[str]) -> dict:
     ts = f'{y}-{mo}-{d}T{hh}:{mi}:{ss}'
     sm = SENDER_RE.match(sender)
     if sender.startswith('Действие') or not sm or SERVICE_SENDER_RE.search(sm.group(1)):
-        return {'service': True, 'cmid': int(cmid), 'ts': ts, 'sender_raw': sender}
+        return {'service': True, 'cmid': int(cmid), 'ts': ts, 'sender_raw': sender,
+                'event': member_event(sender)}
     name, kind, num = sm.group(1), sm.group(2), int(sm.group(3))
     # сообщества (club...) храним с отрицательным vk_id — как отдаёт живой Long Poll
     block = {

@@ -31,7 +31,7 @@ HELP_TEXT = (
     '/чат, /chat - карточка по всей беседе\n'
     '/все, /all - график-гонка + места; можно задать диапазон мест на графике: '
     '/все 2-15, одно число N - топ-N\n'
-    '/население, /population - сколько людей в беседе и сколько из них писали\n'
+    '/население, /population - сколько людей в беседе, сколько писали + график роста\n'
     '/ping - pong\n'
     '/help - справка\n'
     'После команд статистики можно указать период: дата-дата, дата- или дата - '
@@ -69,6 +69,22 @@ def to_local_iso(d) -> str:
     elif d.tzinfo is None:
         d = d.replace(tzinfo=timezone.utc)
     return d.astimezone(db.TZ).replace(tzinfo=None).isoformat(timespec='seconds')
+
+
+_ACTION_DELTAS = {'chat_invite_user': 1, 'chat_invite_user_by_link': 1,
+                  'chat_create': 1, 'chat_kick_user': -1}
+
+
+def action_member_event(item) -> tuple[int, int] | None:
+    """(vk_id, ±1) из сервисного сообщения VK (invite/kick/join/create).
+    None — не про состав беседы. Выход = kick самого себя (member_id == from_id)."""
+    action = getattr(item, 'action', None)
+    if action is None:
+        return None
+    delta = _ACTION_DELTAS.get(getattr(action.type, 'value', str(action.type)))
+    if delta is None:
+        return None
+    return (action.member_id or item.from_id, delta)
 
 
 def build_msg_row(item) -> dict | None:
@@ -124,6 +140,11 @@ async def should_log(conn, message: Message) -> bool:
 async def on_message(message: Message):
     conn = await get_db()
     if await should_log(conn, message):
+        ev = action_member_event(message)
+        if ev and message.conversation_message_id is not None:
+            await db.insert_member_event(conn, message.conversation_message_id,
+                                         to_local_iso(message.date), *ev)
+            await conn.commit()
         row = build_msg_row(message)
         if row is not None:
             name = await ensure_user(conn, row['vk_id'], row['ts'])
@@ -161,6 +182,10 @@ async def backfill_missed():
                 break
             hit_known = False
             for item in hist.items:  # новые -> старые
+                ev = action_member_event(item)
+                if ev and item.conversation_message_id is not None:
+                    await db.insert_member_event(conn, item.conversation_message_id,
+                                                 to_local_iso(item.date), *ev)
                 row = build_msg_row(item)
                 if row is None or row['vk_id'] == own_id:
                     continue
@@ -367,7 +392,13 @@ async def handle_command(conn, message: Message, text: str):
         await message.answer('pong')
         return
     if cmd in ('/население', '/population'):
-        await send_population(conn, message, 'en' if cmd == '/population' else 'ru')
+        lang = 'en' if cmd == '/population' else 'ru'
+        try:
+            since, until = parse_period(arg)
+        except ValueError:
+            await message.answer(PERIOD_HINT[lang])
+            return
+        await send_population(conn, message, lang, since, until)
         return
     if cmd not in ('/я', '/me', '/ты', '/you', '/мы', '/we', '/вы', '/they',
                    '/чат', '/chat', '/все', '/all'):
@@ -408,23 +439,64 @@ async def handle_command(conn, message: Message, text: str):
         await send_ranking_card(conn, message, lang, since, until, rank_range)
 
 
-async def send_population(conn, message: Message, lang: str):
-    """/население: сколько людей в беседе сейчас и сколько хоть раз писали."""
+def population_points(events: list[tuple[str, int]], base: int,
+                      since: str | None, until: str | None,
+                      now: datetime | None = None) -> list[tuple[datetime, int]]:
+    """Точки графика населения: (момент, участников). events — (ts, ±1) по
+    возрастанию, base — население до первого события. Период кропает окно,
+    но значения абсолютные: якорь на левом краю = население к началу периода."""
+    pairs = [(datetime.fromisoformat(t), d) for t, d in events]
+    start = datetime.fromisoformat(since) if since else pairs[0][0]
+    end = datetime.fromisoformat(until) if until else (now or db.now_local())
+    n = base + sum(d for t, d in pairs if t <= start)
+    pts = [(start, n)]
+    for t, d in pairs:
+        if start < t <= end:
+            n += d
+            pts.append((t, n))
+    pts.append((end, n))
+    return pts
+
+
+async def send_population(conn, message: Message, lang: str,
+                          since: str | None = None, until: str | None = None):
+    """/население: текст — сколько людей в беседе сейчас и сколько хоть раз писали,
+    график — население по событиям входа/выхода (период кропает окно).
+    События дают только дельты, поэтому якорим кривую на текущем members_count:
+    пропущенное событие сдвигает старый край, а не «сейчас». Пока событий в БД нет
+    (история не импортирована) — рисуем рост числа писавших."""
     try:
         resp = await bot.api.messages.get_conversations_by_id(peer_ids=[message.peer_id])
         members = resp.items[0].chat_settings.members_count
     except Exception:  # ЛС (нет chat_settings) или API не ответил
         members = None
-    writers = await db.get_writer_count(conn)
+    firsts = await db.get_first_seen_dates(conn)
+    if not firsts:
+        await message.answer(NO_MESSAGES[lang])
+        return
+    writers = len(firsts)
     if lang == 'ru':
         head = (f'👥 Население беседы: {members} '
                 f'{plural_ru(members, "участник", "участника", "участников")}'
                 if members is not None else '👥 Не смог узнать число участников')
-        await message.answer(f'{head}.\nПисали хоть раз: {writers}.')
+        text = f'{head}.\nПисали хоть раз: {writers}.'
     else:
         head = (f'👥 Chat population: {members} member{"s" if members != 1 else ""}'
                 if members is not None else "👥 Couldn't get the member count")
-        await message.answer(f'{head}.\nPosted at least once: {writers}.')
+        text = f'{head}.\nPosted at least once: {writers}.'
+    events = await db.get_member_events(conn)
+    writers_curve = not events
+    if events:
+        # без members якорим на нуле до первого события — экспорт идёт с создания чата
+        base = members - sum(d for _, d in events) if members is not None else 0
+        pts = population_points(events, base, since, until)
+    else:
+        pts = population_points([(t, 1) for t in firsts], 0, since, until)
+    await render_and_send(
+        message, lang, 'population',
+        lambda p: chart.build_population_chart(pts, p, period_label(since, until, lang),
+                                               lang, writers_curve),
+        text=text)
 
 
 async def render_and_send(message: Message, lang: str, label: str, render_fn,

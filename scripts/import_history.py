@@ -17,14 +17,18 @@ EXPORT_PATH = os.getenv('EXPORT_PATH', 'data/export.txt')
 
 async def import_file(export_path: str, db_path: str | None = None) -> dict:
     conn = await db.connect(db_path)
-    stats = {'headers': 0, 'service_skipped': 0, 'inserted': 0, 'duplicates': 0}
+    stats = {'headers': 0, 'service_skipped': 0, 'events': 0, 'inserted': 0, 'duplicates': 0}
     users: dict[int, dict] = {}
     try:
         with open(export_path, encoding='utf-8-sig') as f:
             for block in parsing.parse_export(f):
                 stats['headers'] += 1
                 if block['service']:
-                    stats['service_skipped'] += 1
+                    ev = block['event']
+                    if ev and await db.insert_member_event(conn, block['cmid'], block['ts'], *ev):
+                        stats['events'] += 1
+                    else:
+                        stats['service_skipped'] += 1
                     continue
                 u = users.setdefault(block['vk_id'], {
                     'display_name': block['display_name'],
@@ -53,6 +57,7 @@ def main():
     stats = asyncio.run(import_file(EXPORT_PATH))
     print(f"Заголовков в файле:   {stats['headers']}")
     print(f"Служебных пропущено:  {stats['service_skipped']}")
+    print(f"Событий входа/выхода: {stats['events']}")
     print(f"Импортировано:        {stats['inserted']}")
     print(f"Дубликатов (пропуск): {stats['duplicates']}")
 

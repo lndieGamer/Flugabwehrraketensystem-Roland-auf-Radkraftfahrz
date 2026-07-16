@@ -36,6 +36,13 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_vkid_ts ON messages(vk_id, ts);
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 
+CREATE TABLE IF NOT EXISTS member_events (
+    cmid   INTEGER PRIMARY KEY,
+    ts     TEXT NOT NULL,
+    vk_id  INTEGER NOT NULL,
+    delta  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS milestones_sent (
     milestone_type  TEXT NOT NULL,
     milestone_value TEXT NOT NULL,
@@ -144,10 +151,28 @@ async def get_human_messages(db, since: str | None = None,
         return await cur.fetchall()
 
 
-async def get_writer_count(db) -> int:
-    """Сколько людей (без сообществ) хоть раз писали в беседе."""
-    async with db.execute('SELECT COUNT(*) FROM users WHERE is_community = 0') as cur:
-        return (await cur.fetchone())[0]
+async def insert_member_event(db, cmid: int, ts: str, vk_id: int, delta: int) -> bool:
+    """Вход/выход участника. INSERT OR IGNORE по cmid: True — вставлено, False — дубликат."""
+    cur = await db.execute(
+        'INSERT OR IGNORE INTO member_events VALUES (?, ?, ?, ?)', (cmid, ts, vk_id, delta))
+    return cur.rowcount == 1
+
+
+async def get_member_events(db) -> list[tuple[str, int]]:
+    """(ts, ±1) всех событий состава беседы по возрастанию времени."""
+    async with db.execute('SELECT ts, delta FROM member_events ORDER BY ts, cmid') as cur:
+        return await cur.fetchall()
+
+
+async def get_first_seen_dates(db) -> list[str]:
+    """ts первого сообщения каждого человека (сообщества исключены), по возрастанию —
+    для графика роста «населения» писавших."""
+    async with db.execute(
+        """SELECT MIN(m.ts) AS first_ts
+           FROM messages m JOIN users u ON u.vk_id = m.vk_id
+           WHERE u.is_community = 0 GROUP BY m.vk_id ORDER BY first_ts"""
+    ) as cur:
+        return [r[0] for r in await cur.fetchall()]
 
 
 async def get_all_names(db) -> dict[int, str]:

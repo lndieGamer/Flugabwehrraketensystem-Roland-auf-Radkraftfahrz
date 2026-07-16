@@ -12,7 +12,9 @@ os.environ.setdefault('VK_TOKEN', 'dummy')  # для импорта bot.main
 from bot import db, parsing  # noqa: E402
 import import_history  # noqa: E402
 
-FIXTURE = """03.08.2022, 17:22:53 | Е. Океанов (vk.ru/id45749440) | cmid: 5
+FIXTURE = """03.08.2022, 17:22:20 | Е. Океанов (vk.ru/id45749440) создал чат "Тестовая беседа" | cmid: 1
+
+03.08.2022, 17:22:53 | Е. Океанов (vk.ru/id45749440) | cmid: 5
 Привет всем! Это первое сообщение
 
 03.08.2022, 17:24:54 | Е. Океанов (vk.ru/id45749440) | cmid: 9
@@ -38,19 +40,40 @@ FIXTURE = """03.08.2022, 17:22:53 | Е. Океанов (vk.ru/id45749440) | cmid
 
 с пустой строкой внутри
 
-05.08.2022, 10:00:00 | Е. Океанов пригласил Д. Мещерякова (vk.ru/id999) | cmid: 15
-Е. Океанов пригласил Д. Мещерякова
+05.08.2022, 10:00:00 | Е. Океанов (vk.ru/id45749440) пригласил(а) Д. Мещерякова (vk.ru/id999) | cmid: 15
+
+05.08.2022, 11:00:00 | В. Ссылочник (vk.ru/id777) вступил в чат по ссылке | cmid: 16
+
+05.08.2022, 12:00:00 | Е. Океанов (vk.ru/id45749440) исключил(а) Iris (vk.ru/club190546023) из чата | cmid: 17
+
+05.08.2022, 13:00:00 | Д. Мещеряков (vk.ru/id999) вышел из чата | cmid: 18
 """
 
 
 def test_parser():
     blocks = list(parsing.parse_export(FIXTURE.splitlines()))
-    assert len(blocks) == 8, len(blocks)
+    assert len(blocks) == 12, len(blocks)
 
     by_cmid = {b['cmid']: b for b in blocks}
     assert by_cmid[10]['service'] is True
     assert by_cmid[15]['service'] is True  # «X пригласил Y» — событие, не сообщение Y
-    assert sum(b['service'] for b in blocks) == 2
+    assert sum(b['service'] for b in blocks) == 6
+
+    # события состава беседы: (vk_id, ±1); закреп/фото — None
+    assert by_cmid[1]['event'] == (45749440, 1)  # создал чат
+    assert by_cmid[10]['event'] is None
+    assert by_cmid[15]['event'] == (999, 1)
+    assert by_cmid[16]['event'] == (777, 1)
+    assert by_cmid[17]['event'] == (-190546023, -1)  # исключили сообщество
+    assert by_cmid[18]['event'] == (999, -1)
+    # имя с | внутри: цель — последний vk.ru-адрес
+    assert parsing.member_event(
+        'Е. Океанов (vk.ru/id45749440) пригласил(а) Iris | Чат-менеджер (vk.ru/club174105461)'
+    ) == (-174105461, 1)
+    assert parsing.member_event(
+        'Действие "chat_pin_message, инициатор: Е. Океанов (vk.ru/id45749440), '
+        'цель: Е. Океанов (vk.ru/id45749440)"'
+    ) is None
 
     first = by_cmid[5]
     assert first['vk_id'] == 45749440
@@ -81,10 +104,12 @@ async def _test_import_and_queries(tmp: str):
     db_path = str(Path(tmp) / 'test.db')
 
     stats = await import_history.import_file(str(export), db_path)
-    assert stats == {'headers': 8, 'service_skipped': 2, 'inserted': 6, 'duplicates': 0}, stats
+    assert stats == {'headers': 12, 'service_skipped': 1, 'events': 5,
+                     'inserted': 6, 'duplicates': 0}, stats
 
     stats2 = await import_history.import_file(str(export), db_path)
     assert stats2['inserted'] == 0 and stats2['duplicates'] == 6, stats2  # идемпотентность
+    assert stats2['events'] == 0, stats2  # события тоже не дублируются
 
     conn = await db.connect(db_path)
     try:
@@ -120,6 +145,20 @@ async def _test_import_and_queries(tmp: str):
         png = Path(tmp) / 'card.png'
         chart.build_chart([datetime.fromisoformat(t) for t in ts_all], str(png), 'Тест')
         assert png.stat().st_size > 10_000, png.stat().st_size
+
+        firsts = await db.get_first_seen_dates(conn)
+        assert firsts == ['2022-08-03T17:22:53', '2022-08-04T01:30:00'], firsts  # club исключён
+
+        events = await db.get_member_events(conn)
+        assert events == [('2022-08-03T17:22:20', 1), ('2022-08-05T10:00:00', 1),
+                          ('2022-08-05T11:00:00', 1), ('2022-08-05T12:00:00', -1),
+                          ('2022-08-05T13:00:00', -1)], events
+
+        from bot.main import population_points
+        png3 = Path(tmp) / 'population.png'
+        chart.build_population_chart(
+            population_points(events, 0, None, None, now=datetime(2022, 8, 6)), str(png3))
+        assert png3.stat().st_size > 10_000, png3.stat().st_size
 
         png2 = Path(tmp) / 'compare.png'
         chart.build_compare_chart(
@@ -253,6 +292,54 @@ def test_extract_mentions():
     print('test_extract_mentions ok')
 
 
+def test_population_points():
+    from datetime import datetime
+    from bot.main import population_points
+
+    events = [('2022-08-03T17:22:20', 1), ('2022-08-04T01:30:00', 1),
+              ('2022-08-05T12:00:00', -1)]
+    now = datetime(2022, 8, 6)
+    # без периода: от первого события до «сейчас», выход опускает линию
+    assert population_points(events, 0, None, None, now=now) == [
+        (datetime(2022, 8, 3, 17, 22, 20), 1),
+        (datetime(2022, 8, 4, 1, 30), 2),
+        (datetime(2022, 8, 5, 12, 0), 1),
+        (now, 1),
+    ]
+    # base — якорь (текущее население минус сумма дельт): сдвигает всю кривую
+    assert population_points(events, 10, None, None, now=now)[0][1] == 11
+    # период кропает окно, значения абсолютные: к началу окна уже 1 участник
+    assert population_points(events, 0, '2022-08-04T00:00:00', '2022-08-04T23:59:59') == [
+        (datetime(2022, 8, 4), 1),
+        (datetime(2022, 8, 4, 1, 30), 2),
+        (datetime(2022, 8, 4, 23, 59, 59), 2),
+    ]
+    # период после всех событий: плоская линия на итоговом населении
+    assert population_points(events, 0, '2022-09-01T00:00:00', '2022-09-02T23:59:59') == [
+        (datetime(2022, 9, 1), 1),
+        (datetime(2022, 9, 2, 23, 59, 59), 1),
+    ]
+    print('test_population_points ok')
+
+
+def test_action_member_event():
+    from types import SimpleNamespace as NS
+    from bot.main import action_member_event
+
+    assert action_member_event(
+        NS(action=NS(type=NS(value='chat_invite_user'), member_id=42), from_id=1)) == (42, 1)
+    # выход = kick самого себя; member_id может отсутствовать — берём from_id
+    assert action_member_event(
+        NS(action=NS(type=NS(value='chat_kick_user'), member_id=7), from_id=7)) == (7, -1)
+    assert action_member_event(
+        NS(action=NS(type=NS(value='chat_invite_user_by_link'), member_id=None),
+           from_id=5)) == (5, 1)
+    assert action_member_event(
+        NS(action=NS(type=NS(value='chat_pin_message'), member_id=None), from_id=1)) is None
+    assert action_member_event(NS(action=None, from_id=1)) is None
+    print('test_action_member_event ok')
+
+
 def test_plural_ru():
     from bot.main import plural_ru, years_word
 
@@ -294,6 +381,8 @@ if __name__ == '__main__':
     test_parse_period()
     test_extract_rank_range()
     test_extract_mentions()
+    test_population_points()
+    test_action_member_event()
     test_plural_ru()
     test_build_msg_row()
     with tempfile.TemporaryDirectory() as tmp:

@@ -2,6 +2,7 @@
 по часам, по дням недели). Одна серия — личная карточка или весь чат,
 две серии — сравнение (/мы). Данные приходят списками datetime из БД.
 """
+import os
 from datetime import datetime
 
 import matplotlib
@@ -110,6 +111,15 @@ def build_population_chart(points, output_path: str, subtitle: str | None = None
     plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
     plt.close(fig)
     return output_path
+
+
+def shrink_png(path: str) -> int:
+    """RGB PNG -> палитра 256 цветов: в 2.5 раза меньше без видимой разницы.
+    Канал VPS -> upload-сервер VK узкий, размер файла = время аплоада. Возвращает KB."""
+    from PIL import Image  # зависимость matplotlib, всегда есть
+    im = Image.open(path).convert('RGB').quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+    im.save(path, optimize=True)
+    return os.path.getsize(path) // 1024
 
 
 def _style_dates_axis(ax):

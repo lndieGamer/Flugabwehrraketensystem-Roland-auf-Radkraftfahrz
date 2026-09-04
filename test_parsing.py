@@ -141,6 +141,11 @@ async def _test_import_and_queries(tmp: str):
         png = Path(tmp) / 'card.png'
         chart.build_chart([datetime.fromisoformat(t) for t in ts_all], str(png), 'Тест')
         assert png.stat().st_size > 10_000, png.stat().st_size
+        before = png.stat().st_size
+        kb = chart.shrink_png(str(png))
+        assert 0 < png.stat().st_size < before and kb == png.stat().st_size // 1024
+        from PIL import Image
+        assert Image.open(png).mode == 'P'  # палитровый PNG
 
         firsts = await db.get_first_seen_dates(conn)
         assert firsts == ['2022-08-03T17:22:53', '2022-08-04T01:30:00'], firsts  # club исключён

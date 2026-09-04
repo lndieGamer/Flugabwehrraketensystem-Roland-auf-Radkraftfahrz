@@ -621,7 +621,9 @@ async def render_and_send(message: Message, lang: str, label: str, render_fn,
         async with _render_lock:
             mark('ожидание очереди рендера')
             await asyncio.to_thread(render_fn, out_path)
-        mark('рендер PNG')
+            mark('рендер PNG')
+            kb = await asyncio.to_thread(chart.shrink_png, out_path)
+            mark(f'палитра PNG ({kb} KB)')
         try:
             photo = await upload_photo(out_path)
         except (VKAPIError, json.JSONDecodeError):

@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS messages (
     has_attachment  INTEGER DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_messages_vkid_ts ON messages(vk_id, ts);
+-- word_count в индексе: COUNT/AVG по автору идут по индексу, без чтения строк таблицы
+-- (на VPS-диске это 181К случайных чтений на карточку). Старый индекс сносим при старте.
+DROP INDEX IF EXISTS idx_messages_vkid_ts;
+CREATE INDEX IF NOT EXISTS idx_messages_vkid_ts_wc ON messages(vk_id, ts, word_count);
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 
 CREATE TABLE IF NOT EXISTS member_events (

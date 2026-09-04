@@ -554,17 +554,30 @@ def population_points(events: list[tuple[str, int]], base: int,
     return pts
 
 
+async def members_count(peer_id: int) -> int | None:
+    """Сколько людей в беседе. Сырые запросы без pydantic-моделей vkbottle: модель может
+    не разобрать ответ и молча дать None. Причина неудачи уходит в journal."""
+    attempts = (
+        ('messages.getConversationsById', {'peer_ids': peer_id},
+         lambda r: r['items'][0]['chat_settings']['members_count']),
+        ('messages.getConversationMembers', {'peer_id': peer_id},  # нужны права админа
+         lambda r: r['count']),
+    )
+    for method, params, pick in attempts:
+        try:
+            return int(pick((await bot.api.request(method, params))['response']))
+        except Exception as e:
+            print(f'{method} для peer {peer_id}: {e!r}')
+    return None
+
+
 async def send_population(conn, message: Message, lang: str,
                           since: str | None = None, until: str | None = None):
     """/население: текст — сколько людей в беседе сейчас и сколько хоть раз писали,
     график — население по событиям входа/выхода (период кропает окно).
     События дают только дельты, поэтому якорим кривую на текущем members_count:
     пропущенное событие сдвигает старый край, а не «сейчас»."""
-    try:
-        resp = await bot.api.messages.get_conversations_by_id(peer_ids=[message.peer_id])
-        members = resp.items[0].chat_settings.members_count
-    except Exception:  # ЛС (нет chat_settings) или API не ответил
-        members = None
+    members = await members_count(message.peer_id) if message.peer_id >= 2_000_000_000 else None
     mark('API members_count')
     firsts = await db.get_first_seen_dates(conn)
     if not firsts:
@@ -615,7 +628,6 @@ async def render_and_send(message: Message, lang: str, label: str, render_fn,
             await message.answer('VK не принял картинку, попробуй ещё раз.' if lang == 'ru'
                                  else 'VK rejected the image, try again.')
             return
-        mark('аплоад в VK')
     finally:
         try:
             os.remove(out_path)
@@ -774,12 +786,23 @@ async def upload_photo(path: str) -> str:
     ответ (JSONDecodeError внутри vkbottle) — ретраим и то и другое.
     peer_id=0: аплоад с peer_id беседы от имени группы даёт «photo is undefined» всегда."""
     last_err = None
+    size_kb = os.path.getsize(path) // 1024
     for attempt in range(3):
         try:
-            return await uploader.upload(path, peer_id=0)
+            # шаги uploader.upload() вручную — чтобы /timestats видел, какой из трёх тормозит
+            server = await uploader.get_server(peer_id=0)
+            mark(f'аплоад: getMessagesUploadServer (попытка {attempt + 1})')
+            uploaded = await uploader.upload_files(
+                server['upload_url'], {'photo': uploader.get_bytes_io(await uploader.read(path))})
+            mark(f'аплоад: POST файла {size_kb} KB')
+            photo = (await bot.api.request('photos.saveMessagesPhoto', uploaded))['response'][0]
+            mark('аплоад: saveMessagesPhoto')
+            return uploader.generate_attachment_string(
+                'photo', photo['owner_id'], photo['id'], photo.get('access_key'))
         except (VKAPIError[100], json.JSONDecodeError) as e:
             last_err = e
             await asyncio.sleep(1 + attempt)
+            mark(f'аплоад: {type(e).__name__}, сон {1 + attempt} с')
     raise last_err
 
 

@@ -400,6 +400,17 @@ def test_resolve_target_card():
     print('test_resolve_target_card ok')
 
 
+def test_timing():
+    from bot import main as botmain
+
+    botmain.mark('вне запроса')  # без contextvar — no-op, не падает
+    marks = [('старт', 10.0), ('SQL', 10.25), ('рендер', 11.5)]
+    out = botmain.format_timing('/я', 'id7', marks, lag=2)
+    assert out.splitlines() == ['⏱ /я (id7): 1.50 s', '  доставка VK → бот: 2 s',
+                                '  SQL: 250 ms', '  рендер: 1.25 s'], out
+    print('test_timing ok')
+
+
 def test_build_msg_row():
     from types import SimpleNamespace as NS
     from bot.main import build_msg_row
@@ -432,6 +443,7 @@ if __name__ == '__main__':
     test_plural_ru()
     test_build_msg_row()
     test_resolve_target_card()
+    test_timing()
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(_test_import_and_queries(tmp))
         asyncio.run(_test_should_log(tmp))

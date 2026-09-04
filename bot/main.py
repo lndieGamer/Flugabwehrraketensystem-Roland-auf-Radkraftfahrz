@@ -3,6 +3,7 @@
 Запуск из корня проекта: python -m bot.main
 """
 import asyncio
+import contextvars
 import json
 import os
 import re
@@ -34,6 +35,7 @@ HELP_TEXT = (
     '/все 2-15, одно число N - топ-N\n'
     '/население, /population - сколько людей в беседе, сколько писали + график роста\n'
     '/ping - pong\n'
+    '/timestats - профиль времени ответа в ЛС (вкл/выкл)\n'
     '/help - справка\n'
     'После команд статистики можно указать период: дата-дата, дата- или дата - '
     'от даты до конца, -дата или Х-дата - от начала до даты. Скобки не обязательны. '
@@ -42,6 +44,58 @@ HELP_TEXT = (
 
 _db = None
 _render_lock = asyncio.Lock()  # pyplot не потокобезопасен — рендерим по одному
+
+# --- профиль времени (/timestats) ---
+# Список (этап, monotonic) текущего запроса; contextvar — у каждой задачи vkbottle свой.
+_marks: contextvars.ContextVar[list[tuple[str, float]]] = contextvars.ContextVar('marks')
+_timestats_to: int | None | str = 'unread'  # vk_id получателя профиля из settings; None = выкл
+
+
+def mark(label: str):
+    """Фиксирует конец этапа `label` для отчёта /timestats. Вне запроса — no-op."""
+    m = _marks.get(None)
+    if m is not None:
+        m.append((label, time.monotonic()))
+
+
+def _fmt_dur(sec: float) -> str:
+    return f'{sec * 1000:.0f} ms' if sec < 1 else f'{sec:.2f} s'
+
+
+def format_timing(cmd: str, who: str, marks: list[tuple[str, float]], lag: float) -> str:
+    """Отчёт: общее время, задержка доставки от VK и каждый этап по порядку."""
+    total = marks[-1][1] - marks[0][1]
+    lines = [f'⏱ {cmd} ({who}): {_fmt_dur(total)}',
+             f'  доставка VK → бот: {lag:.0f} s']  # date у VK с точностью до секунды
+    for (label, t), (_, prev) in zip(marks[1:], marks):
+        lines.append(f'  {label}: {_fmt_dur(t - prev)}')
+    return '\n'.join(lines)
+
+
+async def timestats_to(conn) -> int | None:
+    global _timestats_to
+    if _timestats_to == 'unread':
+        v = await db.get_setting(conn, 'timestats_to')
+        _timestats_to = int(v) if v else None
+    return _timestats_to
+
+
+async def report_timing(conn, message: Message, cmd: str, marks: list[tuple[str, float]]):
+    """В journal — всегда; в ЛС — тому, кто включил /timestats."""
+    d = message.date
+    if not isinstance(d, datetime):
+        d = datetime.fromtimestamp(d, tz=timezone.utc)
+    elif d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    lag = (datetime.now(timezone.utc) - d).total_seconds() - (marks[-1][1] - marks[0][1])
+    report = format_timing(cmd, f'id{message.from_id}', marks, max(lag, 0))
+    print(report)
+    to = await timestats_to(conn)
+    if to is not None:
+        try:
+            await bot.api.messages.send(peer_id=to, random_id=0, message=report)
+        except Exception as e:
+            print(f'профиль в ЛС id{to} не ушёл: {e!r}')
 
 
 async def get_db():
@@ -151,6 +205,8 @@ async def should_log(conn, message: Message) -> bool:
 
 @bot.on.message()
 async def on_message(message: Message):
+    marks = [('старт', time.monotonic())]
+    _marks.set(marks)
     conn = await get_db()
     if await should_log(conn, message):
         ev = action_member_event(message)
@@ -173,7 +229,11 @@ async def on_message(message: Message):
     # команды работают везде (в ЛС удобно тестировать), статистика — по основной беседе
     text = (message.text or '').strip()
     if text.startswith('/'):
+        mark('лог сообщения в БД')
         await handle_command(conn, message, text)
+        if not text.startswith('/timestats'):
+            mark('ответ в чат')
+            await report_timing(conn, message, text.split()[0], marks)
 
 
 async def backfill_missed():
@@ -409,6 +469,7 @@ def period_label(since: str | None, until: str | None, lang: str = 'ru') -> str:
 
 
 async def handle_command(conn, message: Message, text: str):
+    global _timestats_to
     parts = text.split(maxsplit=1)
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ''
@@ -417,6 +478,13 @@ async def handle_command(conn, message: Message, text: str):
         return
     if cmd == '/ping':
         await message.answer('pong')
+        return
+    if cmd == '/timestats':
+        on = await timestats_to(conn) != message.from_id
+        _timestats_to = message.from_id if on else None
+        await db.set_setting(conn, 'timestats_to', str(_timestats_to or ''))
+        await message.answer('Профиль времени: вкл, шлю тебе в ЛС после каждой команды.'
+                             if on else 'Профиль времени: выкл.')
         return
     if cmd in ('/население', '/population'):
         lang = 'en' if cmd == '/population' else 'ru'
@@ -453,6 +521,7 @@ async def handle_command(conn, message: Message, text: str):
         await send_compare_card(conn, message, mentions[0], mentions[1], lang, since, until)
     elif cmd in ('/ты', '/you', '/мы', '/we'):
         target = mentions[0] if len(mentions) == 1 else await resolve_target(message)
+        mark('цель (reply/API)')
         if target == message.from_id:
             await message.answer(NEED_REPLY[lang])
             return
@@ -496,6 +565,7 @@ async def send_population(conn, message: Message, lang: str,
         members = resp.items[0].chat_settings.members_count
     except Exception:  # ЛС (нет chat_settings) или API не ответил
         members = None
+    mark('API members_count')
     firsts = await db.get_first_seen_dates(conn)
     if not firsts:
         await message.answer(NO_MESSAGES[lang])
@@ -519,7 +589,9 @@ async def send_population(conn, message: Message, lang: str,
         return
     # без members якорим на нуле до первого события — экспорт идёт с создания чата
     base = members - sum(d for _, d in events) if members is not None else 0
+    mark('SQL first_seen + events')
     pts = population_points(events, base, since, until)
+    mark('точки графика')
     await render_and_send(
         message, lang, 'population',
         lambda p: chart.build_population_chart(pts, p, period_label(since, until, lang), lang),
@@ -533,18 +605,17 @@ async def render_and_send(message: Message, lang: str, label: str, render_fn,
     fd, out_path = tempfile.mkstemp(prefix='vkstats_', suffix='.png')
     os.close(fd)
     try:
-        t0 = time.monotonic()
         async with _render_lock:
+            mark('ожидание очереди рендера')
             await asyncio.to_thread(render_fn, out_path)
-        t1 = time.monotonic()
+        mark('рендер PNG')
         try:
             photo = await upload_photo(out_path)
         except (VKAPIError, json.JSONDecodeError):
             await message.answer('VK не принял картинку, попробуй ещё раз.' if lang == 'ru'
                                  else 'VK rejected the image, try again.')
             return
-        t2 = time.monotonic()
-        print(f'card [{label}] lang={lang}: chart {t1 - t0:.1f}s, upload {t2 - t1:.1f}s')
+        mark('аплоад в VK')
     finally:
         try:
             os.remove(out_path)
@@ -565,6 +636,7 @@ async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str =
                           since: str | None = None, until: str | None = None):
     """Карточка активности одним PNG. vk_id=None — весь чат."""
     stats = await db.get_activity_stats(conn, vk_id, since=since, until=until)
+    mark('SQL stats (count/avg/streak)')
     if not stats:
         await message.answer(NO_MESSAGES[lang])
         return
@@ -583,7 +655,10 @@ async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str =
     if period:
         subtitle += f'   ·   {period}'
 
-    dates = await to_datetimes(await db.get_timestamps(conn, vk_id, since, until))
+    ts = await db.get_timestamps(conn, vk_id, since, until)
+    mark(f'SQL timestamps ({len(ts)})')
+    dates = await to_datetimes(ts)
+    mark('str → datetime')
     sent = await render_and_send(
         message, lang, name,
         lambda p: chart.build_chart(dates, p, name, subtitle, lang))
@@ -597,6 +672,7 @@ async def send_compare_card(conn, message: Message, me_id: int, target_id: int,
     """Сравнение двух участников: по две серии в каждой панели."""
     s_me = await db.get_activity_stats(conn, me_id, since=since, until=until)
     s_t = await db.get_activity_stats(conn, target_id, since=since, until=until)
+    mark('SQL stats ×2')
     if not s_me or not s_t:
         await message.answer('У одного из участников нет сообщений за период.' if lang == 'ru'
                              else 'One of the participants has no messages in this period.')
@@ -614,8 +690,12 @@ async def send_compare_card(conn, message: Message, me_id: int, target_id: int,
     if period:
         subtitle += f'   ·   {period}'
 
-    dates_me = await to_datetimes(await db.get_timestamps(conn, me_id, since, until))
-    dates_t = await to_datetimes(await db.get_timestamps(conn, target_id, since, until))
+    ts_me = await db.get_timestamps(conn, me_id, since, until)
+    ts_t = await db.get_timestamps(conn, target_id, since, until)
+    mark(f'SQL timestamps ×2 ({len(ts_me)}+{len(ts_t)})')
+    dates_me = await to_datetimes(ts_me)
+    dates_t = await to_datetimes(ts_t)
+    mark('str → datetime')
     await render_and_send(
         message, lang, f'{name_me} vs {name_t}',
         lambda p: chart.build_compare_chart((name_me, dates_me), (name_t, dates_t), p, subtitle, lang))
@@ -631,10 +711,12 @@ async def send_ranking_card(conn, message: Message, lang: str = 'ru',
     """/все: график-гонка + текстовый рейтинг с историей смен мест.
     rank_range — какие места рисовать на графике (по умолчанию топ-RACE_TOP)."""
     rows = await db.get_human_messages(conn, since, until)
+    mark(f'SQL все сообщения ({len(rows)})')
     if not rows:
         await message.answer(NO_MESSAGES[lang])
         return
     places = await asyncio.to_thread(ranking.compute_ranking, rows)  # ~250 мс на 1M строк
+    mark('симуляция рейтинга')
     # порог отсекает хвост, ранги остаются сплошными 1..N;
     # в маленьком/молодом чате порог не применяем, чтобы список не опустел
     filtered = [p for p in places if p['count'] >= MIN_RANK_MESSAGES]
@@ -679,6 +761,7 @@ async def send_ranking_card(conn, message: Message, lang: str = 'ru',
         return by_user
 
     by_user = await asyncio.to_thread(group)
+    mark('текст + группировка серий')
     series = [(name_of(p['vk_id']), by_user[p['vk_id']]) for p in places[lo - 1:hi]]
     await render_and_send(
         message, lang, 'ranking',

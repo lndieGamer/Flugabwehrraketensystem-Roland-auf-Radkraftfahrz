@@ -374,6 +374,32 @@ def test_plural_ru():
     print('test_plural_ru ok')
 
 
+def test_resolve_target_card():
+    import asyncio
+    from types import SimpleNamespace as NS
+    from bot import main as botmain
+
+    botmain._card_subject.clear()
+    peer = 2_000_000_004
+    # карточка бота (cmid 50) про пользователя 7; ответ на неё резолвится в 7, а не в бота
+    botmain._card_subject[(peer, 50)] = 7
+    bot_card = NS(from_id=-190546023, conversation_message_id=50)
+    cmd = NS(peer_id=peer, from_id=9, reply_message=bot_card, fwd_messages=None)
+    assert asyncio.run(botmain.resolve_target(cmd)) == 7
+    # обычный ответ человеку — как раньше
+    human = NS(from_id=8, conversation_message_id=51)
+    assert asyncio.run(botmain.resolve_target(NS(peer_id=peer, from_id=9, reply_message=human,
+                                                fwd_messages=None))) == 8
+    # та же cmid в другой беседе — не карточка
+    assert asyncio.run(botmain.resolve_target(NS(peer_id=peer + 1, from_id=9, reply_message=bot_card,
+                                                fwd_messages=None))) == bot_card.from_id
+    # мобильный клиент: ответ пришёл как fwd
+    assert asyncio.run(botmain.resolve_target(NS(peer_id=peer, from_id=9, reply_message=None,
+                                                fwd_messages=[bot_card]))) == 7
+    botmain._card_subject.clear()
+    print('test_resolve_target_card ok')
+
+
 def test_build_msg_row():
     from types import SimpleNamespace as NS
     from bot.main import build_msg_row
@@ -405,6 +431,7 @@ if __name__ == '__main__':
     test_action_member_event()
     test_plural_ru()
     test_build_msg_row()
+    test_resolve_target_card()
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(_test_import_and_queries(tmp))
         asyncio.run(_test_should_log(tmp))

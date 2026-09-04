@@ -267,16 +267,27 @@ async def check_milestones(conn, message: Message, total: int, user_total: int, 
 
 # --- команды ---
 
+_card_subject: dict[tuple[int, int], int] = {}  # (peer_id, cmid карточки бота) -> чья она
+# ponytail: живёт до рестарта; после него ответ на старую карточку даёт обычную подсказку
+
+
+def subject_of(peer_id: int, ref) -> int:
+    """Автор reply/fwd-сообщения. Если это личная карточка бота (/я, /ты) — тот,
+    чья карточка: люди часто пишут /мы в ответ боту, а не человеку."""
+    cmid = getattr(ref, 'conversation_message_id', None)
+    return _card_subject.get((peer_id, cmid), ref.from_id)
+
+
 async def resolve_target(message: Message) -> int:
     """Чью статистику показывать: автора reply-сообщения, если команда — ответ.
 
     Мобильные клиенты VK иногда кладут ответ в fwd_messages вместо reply_message,
     а Long Poll может вообще не приложить это поле — тогда дотягиваем сообщение по API."""
     if message.reply_message:
-        return message.reply_message.from_id
+        return subject_of(message.peer_id, message.reply_message)
     fwd = getattr(message, 'fwd_messages', None) or []
     if len(fwd) == 1 and fwd[0].from_id:
-        return fwd[0].from_id
+        return subject_of(message.peer_id, fwd[0])
     try:
         resp = await bot.api.messages.get_by_conversation_message_id(
             peer_id=message.peer_id,
@@ -285,9 +296,9 @@ async def resolve_target(message: Message) -> int:
         item = resp.items[0] if resp.items else None
         if item:
             if item.reply_message:
-                return item.reply_message.from_id
+                return subject_of(message.peer_id, item.reply_message)
             if item.fwd_messages and len(item.fwd_messages) == 1:
-                return item.fwd_messages[0].from_id
+                return subject_of(message.peer_id, item.fwd_messages[0])
     except Exception:
         pass
     return message.from_id
@@ -517,7 +528,8 @@ async def send_population(conn, message: Message, lang: str,
 
 async def render_and_send(message: Message, lang: str, label: str, render_fn,
                           text: str | None = None):
-    """Рендерит PNG через render_fn(out_path), грузит в VK, шлёт в чат."""
+    """Рендерит PNG через render_fn(out_path), грузит в VK, шлёт в чат.
+    Возвращает ответ messages.send (с cmid) или None, если картинку не приняли."""
     fd, out_path = tempfile.mkstemp(prefix='vkstats_', suffix='.png')
     os.close(fd)
     try:
@@ -538,7 +550,7 @@ async def render_and_send(message: Message, lang: str, label: str, render_fn,
             os.remove(out_path)
         except OSError:
             pass
-    await message.answer(text, attachment=photo)
+    return await message.answer(text, attachment=photo)
 
 
 NO_MESSAGES = {'ru': 'Сообщений за период нет.', 'en': 'No messages in this period.'}
@@ -572,9 +584,11 @@ async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str =
         subtitle += f'   ·   {period}'
 
     dates = await to_datetimes(await db.get_timestamps(conn, vk_id, since, until))
-    await render_and_send(
+    sent = await render_and_send(
         message, lang, name,
         lambda p: chart.build_chart(dates, p, name, subtitle, lang))
+    if sent is not None and vk_id is not None and sent.conversation_message_id:
+        _card_subject[(message.peer_id, sent.conversation_message_id)] = vk_id
 
 
 async def send_compare_card(conn, message: Message, me_id: int, target_id: int,

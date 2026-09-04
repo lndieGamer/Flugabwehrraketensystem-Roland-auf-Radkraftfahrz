@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import signal
 import tempfile
 import time
 from datetime import date, datetime, timezone
@@ -14,7 +15,7 @@ from dotenv import load_dotenv
 from vkbottle import PhotoMessageUploader, VKAPIError
 from vkbottle.bot import Bot, Message
 
-from bot import chart, db, parsing, ranking
+from bot import chart, db, notify, parsing, ranking
 
 load_dotenv()
 bot = Bot(token=os.environ['VK_TOKEN'])
@@ -48,6 +49,18 @@ async def get_db():
     if _db is None:
         _db = await db.connect()
     return _db
+
+
+_counts: dict[int | None, int] = {}  # число сообщений: None = весь чат, иначе vk_id
+# ponytail: кэш ленивый, растёт на каждой вставке; импорт при живом боте он не видит,
+# веха может проскочить — рестарт бота лечит
+
+
+async def msg_count(conn, vk_id: int | None) -> int:
+    if vk_id not in _counts:
+        _counts[vk_id] = await (db.get_total_count(conn) if vk_id is None
+                                else db.get_user_count(conn, vk_id))
+    return _counts[vk_id]
 
 
 async def resolve_name(vk_id: int) -> str:
@@ -144,16 +157,19 @@ async def on_message(message: Message):
         if ev and message.conversation_message_id is not None:
             await db.insert_member_event(conn, message.conversation_message_id,
                                          to_local_iso(message.date), *ev)
-            await conn.commit()
         row = build_msg_row(message)
         if row is not None:
             name = await ensure_user(conn, row['vk_id'], row['ts'])
-            total_before = await db.get_total_count(conn)
-            user_before = await db.get_user_count(conn, row['vk_id'])
+            await msg_count(conn, None)  # прогрев кэша до вставки, иначе COUNT учтёт её
+            await msg_count(conn, row['vk_id'])
             inserted = await db.insert_message(conn, row)
             await conn.commit()
             if inserted:
-                await check_milestones(conn, message, total_before + 1, user_before + 1, name)
+                _counts[None] += 1
+                _counts[row['vk_id']] += 1
+                await check_milestones(conn, message, _counts[None], _counts[row['vk_id']], name)
+        else:
+            await conn.commit()
     # команды работают везде (в ЛС удобно тестировать), статистика — по основной беседе
     text = (message.text or '').strip()
     if text.startswith('/'):
@@ -528,6 +544,11 @@ async def render_and_send(message: Message, lang: str, label: str, render_fn,
 NO_MESSAGES = {'ru': 'Сообщений за период нет.', 'en': 'No messages in this period.'}
 
 
+async def to_datetimes(ts: list[str]) -> list[datetime]:
+    """Миллион fromisoformat — сотни мс; в потоке, чтобы не морозить event loop."""
+    return await asyncio.to_thread(lambda: [datetime.fromisoformat(t) for t in ts])
+
+
 async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str = 'ru',
                           since: str | None = None, until: str | None = None):
     """Карточка активности одним PNG. vk_id=None — весь чат."""
@@ -550,8 +571,7 @@ async def send_stats_card(conn, message: Message, vk_id: int | None, lang: str =
     if period:
         subtitle += f'   ·   {period}'
 
-    dates = [datetime.fromisoformat(t)
-             for t in await db.get_timestamps(conn, vk_id, since, until)]
+    dates = await to_datetimes(await db.get_timestamps(conn, vk_id, since, until))
     await render_and_send(
         message, lang, name,
         lambda p: chart.build_chart(dates, p, name, subtitle, lang))
@@ -580,10 +600,8 @@ async def send_compare_card(conn, message: Message, me_id: int, target_id: int,
     if period:
         subtitle += f'   ·   {period}'
 
-    dates_me = [datetime.fromisoformat(t)
-                for t in await db.get_timestamps(conn, me_id, since, until)]
-    dates_t = [datetime.fromisoformat(t)
-               for t in await db.get_timestamps(conn, target_id, since, until)]
+    dates_me = await to_datetimes(await db.get_timestamps(conn, me_id, since, until))
+    dates_t = await to_datetimes(await db.get_timestamps(conn, target_id, since, until))
     await render_and_send(
         message, lang, f'{name_me} vs {name_t}',
         lambda p: chart.build_compare_chart((name_me, dates_me), (name_t, dates_t), p, subtitle, lang))
@@ -602,7 +620,7 @@ async def send_ranking_card(conn, message: Message, lang: str = 'ru',
     if not rows:
         await message.answer(NO_MESSAGES[lang])
         return
-    places = ranking.compute_ranking(rows)
+    places = await asyncio.to_thread(ranking.compute_ranking, rows)  # ~250 мс на 1M строк
     # порог отсекает хвост, ранги остаются сплошными 1..N;
     # в маленьком/молодом чате порог не применяем, чтобы список не опустел
     filtered = [p for p in places if p['count'] >= MIN_RANK_MESSAGES]
@@ -637,9 +655,16 @@ async def send_ranking_card(conn, message: Message, lang: str = 'ru',
         await message.answer(f'В рейтинге всего {len(places)} мест.' if lang == 'ru'
                              else f'The ranking only has {len(places)} places.')
         return
-    by_user: dict[int, list] = {}
-    for vk_id, ts in rows:
-        by_user.setdefault(vk_id, []).append(datetime.fromisoformat(ts))
+    shown = {p['vk_id'] for p in places[lo - 1:hi]}
+
+    def group():
+        by_user: dict[int, list] = {}
+        for vk_id, ts in rows:
+            if vk_id in shown:
+                by_user.setdefault(vk_id, []).append(datetime.fromisoformat(ts))
+        return by_user
+
+    by_user = await asyncio.to_thread(group)
     series = [(name_of(p['vk_id']), by_user[p['vk_id']]) for p in places[lo - 1:hi]]
     await render_and_send(
         message, lang, 'ranking',
@@ -661,13 +686,26 @@ async def upload_photo(path: str) -> str:
     raise last_err
 
 
+async def announce(text: str):
+    """Статус в беседу и ЛС получателю (NOTIFY_VK_ID); сбой отправки бота не валит."""
+    try:
+        await asyncio.to_thread(notify.send_status_vk, text)
+    except Exception as e:
+        print(f'статус «{text}» не отправлен: {e!r}')
+
+
 if __name__ == '__main__':
+    # systemd шлёт SIGTERM; по умолчанию Python молча умирает и on_shutdown не бежит.
+    # default_int_handler превращает его в KeyboardInterrupt — vkbottle гасит задачи и
+    # выполняет on_shutdown. Крэш-хендлер ниже его не ловит (BaseException) — «упал» не шлём.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+    bot.on_startup.append(announce('Я вернулся'))
     bot.on_startup.append(backfill_missed())
+    bot.on_shutdown.append(announce('Я ухожу на рестарт'))
     try:
         bot.run()
     except Exception:
         import traceback
 
-        from bot.notify import notify_crash
-        notify_crash(traceback.format_exc())
+        notify.notify_crash(traceback.format_exc())
         raise

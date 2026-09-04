@@ -70,6 +70,9 @@ async def connect(db_path: str | None = None) -> aiosqlite.Connection:
     db = await aiosqlite.connect(path)
     # WAL + busy_timeout: бот и импортёр могут работать одновременно без «database is locked»
     await db.execute('PRAGMA journal_mode=WAL')
+    # NORMAL в WAL: fsync только на checkpoint, а не на каждый commit;
+    # данные теряются лишь при отключении питания, не при падении процесса
+    await db.execute('PRAGMA synchronous=NORMAL')
     await db.execute('PRAGMA busy_timeout=5000')
     await db.executescript(SCHEMA)
     await db.commit()
@@ -192,18 +195,15 @@ async def get_timestamps(db, vk_id: int | None = None, since: str | None = None,
 
 async def get_activity_stats(db, vk_id: int | None = None, today: date | None = None,
                              since: str | None = None, until: str | None = None) -> dict | None:
-    """Сова (0–6) / жаворонок (6–12), streak, средняя длина. vk_id=None — весь чат.
+    """Streak и средняя длина сообщения. vk_id=None — весь чат.
     При заданном until streak считается относительно конца периода."""
     where, params = _range_where(vk_id, since, until)
     if today is None and until:
         today = date.fromisoformat(until[:10])
     async with db.execute(
-        f"""SELECT COUNT(*), AVG(word_count),
-                   AVG(substr(ts, 12, 2) < '06'),
-                   AVG(substr(ts, 12, 2) >= '06' AND substr(ts, 12, 2) < '12')
-            FROM messages {where}""", params
+        f'SELECT COUNT(*), AVG(word_count) FROM messages {where}', params
     ) as cur:
-        total, avg_words, night, morning = await cur.fetchone()
+        total, avg_words = await cur.fetchone()
     if not total:
         return None
 
@@ -221,8 +221,6 @@ async def get_activity_stats(db, vk_id: int | None = None, today: date | None = 
     return {
         'total': total,
         'avg_words': avg_words or 0.0,
-        'night_share': night or 0.0,
-        'morning_share': morning or 0.0,
         'streak': streak,
     }
 

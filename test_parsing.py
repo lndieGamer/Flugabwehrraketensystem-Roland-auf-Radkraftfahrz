@@ -118,10 +118,6 @@ async def _test_import_and_queries(tmp: str):
         s = await db.get_activity_stats(conn, 45749440, today=date(2022, 8, 4))
         assert s['total'] == 3
         assert s['streak'] == 2, s['streak']
-        assert s['night_share'] == 0 and s['morning_share'] == 0
-
-        s2 = await db.get_activity_stats(conn, 123, today=date(2022, 8, 4))
-        assert s2['night_share'] == 1.0
 
         chat = await db.get_activity_stats(conn, today=date(2022, 8, 4))
         assert chat['total'] == 6 and chat['streak'] == 2
@@ -279,6 +275,30 @@ async def _test_should_log(tmp: str):
     print('test_should_log ok')
 
 
+async def _test_msg_count(tmp: str):
+    from bot import main as botmain
+
+    conn = await db.connect(str(Path(tmp) / 'cnt.db'))
+    try:
+        botmain._counts.clear()
+        row = {'cmid': 1, 'vk_id': 7, 'ts': '2022-08-03T10:00:00', 'text': 'a',
+               'word_count': 1, 'is_reply': 0, 'reply_to_cmid': None,
+               'has_sticker': 0, 'has_photo': 0, 'has_attachment': 0}
+        await db.insert_message(conn, row)
+        # первый вызов греет из БД, дальше — из кэша без COUNT
+        assert await botmain.msg_count(conn, None) == 1
+        assert await botmain.msg_count(conn, 7) == 1
+        assert await botmain.msg_count(conn, 8) == 0
+        await db.insert_message(conn, dict(row, cmid=2))
+        assert await botmain.msg_count(conn, None) == 1  # кэш не видит вставку мимо него
+        botmain._counts[None] += 1
+        assert await botmain.msg_count(conn, None) == 2
+    finally:
+        botmain._counts.clear()
+        await conn.close()
+    print('test_msg_count ok')
+
+
 def test_extract_mentions():
     from bot.main import extract_mentions
 
@@ -388,4 +408,5 @@ if __name__ == '__main__':
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(_test_import_and_queries(tmp))
         asyncio.run(_test_should_log(tmp))
+        asyncio.run(_test_msg_count(tmp))
     print('все проверки прошли')

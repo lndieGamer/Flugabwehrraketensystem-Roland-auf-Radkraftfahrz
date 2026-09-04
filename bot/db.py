@@ -170,15 +170,11 @@ async def get_member_events(db) -> list[tuple[str, int]]:
         return await cur.fetchall()
 
 
-async def get_first_seen_dates(db) -> list[str]:
-    """ts первого сообщения каждого человека (сообщества исключены), по возрастанию —
-    для графика роста «населения» писавших."""
-    async with db.execute(
-        """SELECT MIN(m.ts) AS first_ts
-           FROM messages m JOIN users u ON u.vk_id = m.vk_id
-           WHERE u.is_community = 0 GROUP BY m.vk_id ORDER BY first_ts"""
-    ) as cur:
-        return [r[0] for r in await cur.fetchall()]
+async def count_writers(db) -> int:
+    """Сколько людей (не сообществ) написали хоть раз. users пополняется только
+    авторами сообщений, так что это COUNT по 100 строкам, а не GROUP BY по миллиону."""
+    async with db.execute('SELECT COUNT(*) FROM users WHERE is_community = 0') as cur:
+        return (await cur.fetchone())[0]
 
 
 async def get_all_names(db) -> dict[int, str]:

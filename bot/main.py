@@ -194,13 +194,19 @@ async def should_log(conn, message: Message) -> bool:
     global _main_peer
     if message.peer_id < 2_000_000_000:  # ЛС
         return False
+    if await main_peer(conn) is None:
+        await db.set_setting(conn, 'peer_id', str(message.peer_id))
+        _main_peer = message.peer_id
+    return message.peer_id == _main_peer
+
+
+async def main_peer(conn) -> int | None:
+    """peer_id основной беседы; None — бот ещё не видел ни одного сообщения из беседы."""
+    global _main_peer
     if _main_peer is None:
         saved = await db.get_setting(conn, 'peer_id')
-        if saved is None:
-            await db.set_setting(conn, 'peer_id', str(message.peer_id))
-            saved = str(message.peer_id)
-        _main_peer = int(saved)
-    return message.peer_id == _main_peer
+        _main_peer = int(saved) if saved else None
+    return _main_peer
 
 
 @bot.on.message()
@@ -577,13 +583,14 @@ async def send_population(conn, message: Message, lang: str,
     график — население по событиям входа/выхода (период кропает окно).
     События дают только дельты, поэтому якорим кривую на текущем members_count:
     пропущенное событие сдвигает старый край, а не «сейчас»."""
-    members = await members_count(message.peer_id) if message.peer_id >= 2_000_000_000 else None
+    # статистика всегда по основной беседе, даже если команду прислали боту в ЛС
+    peer = await main_peer(conn)
+    members = await members_count(peer) if peer else None
     mark('API members_count')
-    firsts = await db.get_first_seen_dates(conn)
-    if not firsts:
+    writers = await db.count_writers(conn)
+    if not writers:
         await message.answer(NO_MESSAGES[lang])
         return
-    writers = len(firsts)
     if lang == 'ru':
         head = (f'👥 Население беседы: {members} '
                 f'{plural_ru(members, "участник", "участника", "участников")}'

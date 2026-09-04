@@ -147,8 +147,7 @@ async def _test_import_and_queries(tmp: str):
         from PIL import Image
         assert Image.open(png).mode == 'P'  # палитровый PNG
 
-        firsts = await db.get_first_seen_dates(conn)
-        assert firsts == ['2022-08-03T17:22:53', '2022-08-04T01:30:00'], firsts  # club исключён
+        assert await db.count_writers(conn) == 2  # club исключён
 
         events = await db.get_member_events(conn)
         assert events == [('2022-08-03T17:22:20', 1), ('2022-08-05T10:00:00', 1),

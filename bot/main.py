@@ -33,7 +33,7 @@ HELP_TEXT = (
     '/чат, /chat - карточка по всей беседе\n'
     '/все, /all - график-гонка + места; можно задать диапазон мест на графике: '
     '/все 2-15, одно число N - топ-N\n'
-    '/население, /population - сколько людей в беседе, сколько писали + график роста\n'
+    '/демография, /demography - сколько людей в беседе, сколько писали + график роста\n'
     '/ping - pong\n'
     '/timestats - профиль времени ответа в ЛС (вкл/выкл)\n'
     '/help - справка\n'
@@ -492,8 +492,8 @@ async def handle_command(conn, message: Message, text: str):
         await message.answer('Профиль времени: вкл, шлю тебе в ЛС после каждой команды.'
                              if on else 'Профиль времени: выкл.')
         return
-    if cmd in ('/население', '/population'):
-        lang = 'en' if cmd == '/population' else 'ru'
+    if cmd in ('/демография', '/demography'):
+        lang = 'en' if cmd == '/demography' else 'ru'
         try:
             since, until = parse_period(arg)
         except ValueError:
@@ -579,7 +579,7 @@ async def members_count(peer_id: int) -> int | None:
 
 async def send_population(conn, message: Message, lang: str,
                           since: str | None = None, until: str | None = None):
-    """/население: текст — сколько людей в беседе сейчас и сколько хоть раз писали,
+    """/демография: текст — сколько людей в беседе сейчас и сколько хоть раз писали,
     график — население по событиям входа/выхода (период кропает окно).
     События дают только дельты, поэтому якорим кривую на текущем members_count:
     пропущенное событие сдвигает старый край, а не «сейчас»."""

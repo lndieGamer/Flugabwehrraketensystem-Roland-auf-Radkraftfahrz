@@ -829,3 +829,8 @@ if __name__ == '__main__':
 
         notify.notify_crash(traceback.format_exc())
         raise
+    finally:
+        # Поток aiosqlite не daemon: без стопа интерпретатор ждёт его вечно, systemd
+        # через TimeoutStopSec шлёт SIGKILL, юнит уходит в failed -> ложное «Я упал».
+        if _db is not None:
+            _db.stop()

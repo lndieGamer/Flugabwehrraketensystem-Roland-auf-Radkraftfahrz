@@ -15,6 +15,8 @@ WorkingDirectory=/opt/vkstats
 ExecStart=/opt/vkstats/venv/bin/python -m bot.main
 Restart=always
 RestartSec=5
+# штатный стоп занимает секунды (статус в чат + закрытие БД); дольше = что-то зависло
+TimeoutStopSec=20
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

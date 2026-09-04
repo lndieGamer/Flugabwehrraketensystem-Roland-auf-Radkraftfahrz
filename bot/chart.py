@@ -2,6 +2,8 @@
 по часам, по дням недели). Одна серия — личная карточка или весь чат,
 две серии — сравнение (/мы). Данные приходят списками datetime из БД.
 """
+from datetime import datetime
+
 import matplotlib
 
 matplotlib.use('Agg')
@@ -9,6 +11,8 @@ import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 from matplotlib import font_manager  # noqa: E402
+
+from bot.db import TZ  # noqa: E402
 
 # DejaVu без CJK-глифов — японские/китайские ники превращаются в квадраты.
 # Подхватываем первый доступный CJK-шрифт как fallback (на VPS: apt install fonts-noto-cjk).
@@ -122,6 +126,7 @@ def _style_common(ax):
 def _render(series, output_path, subtitle, lang):
     L = LABELS.get(lang, LABELS['ru'])
     multi = len(series) > 1
+    _now = pd.Timestamp(datetime.now(TZ).replace(tzinfo=None))
     for _, dates in series:
         if not dates:
             raise ValueError('Пустой список сообщений')
@@ -142,9 +147,17 @@ def _render(series, output_path, subtitle, lang):
         # resample('W') подписывает воскресеньем-концом — «пик в будущем»
         weekly = s.resample('W-MON', closed='left', label='left').sum()
         color = SERIES_COLORS[i] if multi else '#2a78d6'
-        ax1.plot(weekly.index, weekly.values, color=color, linewidth=1.2, label=name)
-        ax1.fill_between(weekly.index, weekly.values, color=color,
+        # текущая (недособранная) неделя — пунктиром и без заливки, чтобы
+        # провал в начале недели не читался как падение активности
+        partial = len(weekly) > 1 and weekly.index[-1] > _now - pd.Timedelta(days=7)
+        solid = weekly.iloc[:-1] if partial else weekly
+        ax1.plot(solid.index, solid.values, color=color, linewidth=1.2, label=name)
+        ax1.fill_between(solid.index, solid.values, color=color,
                          alpha=0.08 if multi else 0.15)
+        if partial:
+            tail = weekly.iloc[-2:]
+            ax1.plot(tail.index, tail.values, color=color, linewidth=1.2,
+                     linestyle=(0, (3, 3)))
         if not multi:
             peak_idx = weekly.values.argmax()
             peak_date, peak_val = weekly.index[peak_idx], weekly.values[peak_idx]
